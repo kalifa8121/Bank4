@@ -7,7 +7,14 @@ import sys
 import time
 import atexit
 from io import BytesIO
-from PIL import Image
+
+# PIL (Pillow) exception handling for Render deployment stability
+try:
+    from PIL import Image
+    HAS_PIL = True
+except ImportError:
+    HAS_PIL = False
+
 from flask import Flask, request, redirect, url_for, session, render_template_string, send_from_directory, jsonify, send_file
 from werkzeug.utils import secure_filename
 
@@ -34,7 +41,7 @@ def compress_and_save_image(file_storage, target_filename, max_size=(600, 600), 
     filepath = os.path.join(app.config['UPLOAD_FOLDER'], target_filename)
     filename = file_storage.filename.lower()
     
-    if filename.endswith('.pdf'):
+    if filename.endswith('.pdf') or not HAS_PIL:
         file_storage.save(filepath)
         return target_filename
 
@@ -1850,279 +1857,97 @@ def manage_users():
         return "🚫 Hayyama CEO Qofa!", 403
 
     msg = None
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
     if request.method == 'POST':
         action = request.form.get('action')
         
         if action == 'add_user':
-            username = request.form.get('username').strip()
-            password = request.form.get('password').strip()
+            username = request.form.get('username', '').strip()
+            password = request.form.get('password', '').strip()
             role = request.form.get('role')
 
-            conn = get_db_connection()
-            cursor = conn.cursor()
             try:
                 cursor.execute("INSERT INTO users (username, password, role, status) VALUES (?, ?, ?, 'ACTIVE')", (username, password, role))
                 conn.commit()
-                msg = f"✅ Hojjataa haaraa '{username}' ({role}) galmaa'eera!"
+                msg = f"✅ Hojjataa haaraan ({username}) milkaa'inaan galmaa'eera!"
             except sqlite3.IntegrityError:
-                msg = f"❌ Usernamni '{username}' duraan exist godha!"
-            conn.close()
-
-        elif action == 'change_password':
-            username = request.form.get('target_user')
-            new_pass = request.form.get('new_password').strip()
-
-            conn = get_db_connection()
-            cursor = conn.cursor()
-            cursor.execute("UPDATE users SET password = ? WHERE username = ?", (new_pass, username))
+                msg = f"❌ Username ({username}) duraan jira, kan biraa fiyyaadamaa!"
+        elif action == 'toggle_status':
+            target_user = request.form.get('target_user')
+            current_status = request.form.get('current_status')
+            new_status = 'BLOCKED' if current_status == 'ACTIVE' else 'ACTIVE'
+            
+            cursor.execute("UPDATE users SET status = ? WHERE username = ?", (new_status, target_user))
             conn.commit()
-            conn.close()
-            msg = f"🔑 Password '<b>{username}</b>'-f haaraa jijjiirameera!"
+            msg = f"✅ Status hojjataa ({target_user}) gara '{new_status}'tti jijjiirameera!"
 
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT username, role, status, password FROM users")
-    users_list = cursor.fetchall()
+    cursor.execute("SELECT username, role, status FROM users")
+    users = cursor.fetchall()
     conn.close()
 
     users_html = ""
-    for idx, u in enumerate(users_list):
+    for u in users:
         badge_cls = "badge-active" if u['status'] == 'ACTIVE' else "badge-danger"
-        toggle_txt = "🚫 Ugguri" if u['status'] == 'ACTIVE' else "✅ Hiiki"
-        toggle_btn_cls = "btn-red" if u['status'] == 'ACTIVE' else "btn-green"
+        toggle_btn = ""
+        if u['username'] != 'ceo':
+            toggle_btn = f"""
+            <form method="POST" style="display:inline;">
+                <input type="hidden" name="action" value="toggle_status">
+                <input type="hidden" name="target_user" value="{u['username']}">
+                <input type="hidden" name="current_status" value="{u['status']}">
+                <button type="submit" class="btn-action {'btn-red' if u['status'] == 'ACTIVE' else 'btn-green'}" style="font-size:10px; padding:3px 8px;">
+                    {'Ugguri (Block)' if u['status'] == 'ACTIVE' else 'Bani (Unblock)'}
+                </button>
+            </form>
+            """
 
         users_html += f"""
-        <tr style="border-bottom:1px solid #e2e8f0; font-size:12px;">
-            <td style="padding:8px; font-weight:bold;">{u['username']}</td>
-            <td style="padding:8px;"><span class="role-badge">{u['role']}</span></td>
-            <td style="padding:8px;"><span class="badge {badge_cls}">{u['status']}</span></td>
-            <td style="padding:8px;">
-                <input type="password" id="pass_field_{idx}" value="{u['password']}" readonly style="border:none; background:transparent; width:80px; font-size:12px;">
-                <span id="pass_toggle_{idx}" style="cursor:pointer;" onclick="togglePasswordVisibility('pass_field_{idx}', 'pass_toggle_{idx}')">👁️</span>
-            </td>
-            <td style="padding:8px; text-align:right;">
-                <a href="/toggle_user/{u['username']}" class="btn-action {toggle_btn_cls}" style="font-size:10px; padding:4px 8px;">{toggle_txt}</a>
-            </td>
-        </tr>
-        """
-
-    msg_html = f"<p style='background:#dcfce7; color:#166534; padding:10px; border-radius:6px; font-size:12px; font-weight:bold; margin-bottom:12px;'>{msg}</p>" if msg else ""
-
-    content = f"""
-    <div class="box">
-        <h2 style="font-size: 16px; margin-bottom: 12px;">⚙️ Bulchiinsa Hojjattootaa (CEO)</h2>
-        {msg_html}
-
-        <h3 style="font-size: 13px; color:#065f46; margin-bottom:8px;">➕ Hojjataa Haaraa Galmeessi</h3>
-        <form method="POST" style="margin-bottom:20px;">
-            <input type="hidden" name="action" value="add_user">
-            <div class="form-group">
-                <input type="text" name="username" placeholder="Username" required class="input-field">
+        <div class="item-card" style="display:flex; justify-content:space-between; align-items:center;">
+            <div>
+                <b>{u['username']}</b> <span class="role-badge">{u['role']}</span>
+                <span class="badge {badge_cls}">{u['status']}</span>
             </div>
-            <div class="form-group">
-                <input type="password" id="new_user_pwd" name="password" placeholder="Password" required class="input-field">
-                <span id="new_user_pwd_toggle" class="pwd-toggle" onclick="togglePasswordVisibility('new_user_pwd', 'new_user_pwd_toggle')">👁️</span>
-            </div>
-            <div class="form-group">
-                <select name="role" class="input-field">
-                    <option value="MAKER">MAKER</option>
-                    <option value="MANAGER">MANAGER</option>
-                    <option value="AUDITOR">AUDITOR</option>
-                    <option value="LOAN_OFFICER">LOAN OFFICER</option>
-                    <option value="CEO">CEO</option>
-                </select>
-            </div>
-            <button type="submit" class="btn-submit">Uumii (Create User)</button>
-        </form>
-
-        <hr style="margin:16px 0; border:0; border-top:1px solid #e2e8f0;">
-
-        <h3 style="font-size: 13px; color:#581c87; margin-bottom:8px;">🔑 Password Hojjataa Jijjiiri</h3>
-        <form method="POST" style="margin-bottom:20px;">
-            <input type="hidden" name="action" value="change_password">
-            <div class="form-group">
-                <select name="target_user" class="input-field">
-                    {''.join([f'<option value="{u["username"]}">{u["username"]} ({u["role"]})</option>' for u in users_list])}
-                </select>
-            </div>
-            <div class="form-group">
-                <input type="password" id="chg_user_pwd" name="new_password" placeholder="Password Haaraa" required class="input-field">
-                <span id="chg_user_pwd_toggle" class="pwd-toggle" onclick="togglePasswordVisibility('chg_user_pwd', 'chg_user_pwd_toggle')">👁️</span>
-            </div>
-            <button type="submit" class="btn-submit" style="background:#581c87;">Jijjiiri Password</button>
-        </form>
-    </div>
-
-    <h3 style="font-size:14px; margin-bottom:8px; color:#334155;">👥 Listii Hojjattoota Systema</h3>
-    <div class="box" style="padding:0; overflow-x:auto;">
-        <table style="width:100%; border-collapse:collapse; text-align:left;">
-            <thead>
-                <tr style="background:#f8fafc; font-size:11px; color:#64748b; border-bottom:1px solid #e2e8f0;">
-                    <th style="padding:8px;">User</th>
-                    <th style="padding:8px;">Shoora</th>
-                    <th style="padding:8px;">Status</th>
-                    <th style="padding:8px;">Pass</th>
-                    <th style="padding:8px; text-align:right;">Action</th>
-                </tr>
-            </thead>
-            <tbody>
-                {users_html}
-            </tbody>
-        </table>
-    </div>
-    """
-    return render_template_string(HTML_LAYOUT.replace("{% block content %}{% endblock %}", content), notifications=NOTIFICATIONS)
-
-@app.route('/toggle_user/<username>')
-def toggle_user(username):
-    if 'role' not in session or session['role'] != 'CEO':
-        return redirect('/login')
-
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT status FROM users WHERE username = ?", (username,))
-    res = cursor.fetchone()
-    if res:
-        new_status = 'BLOCKED' if res['status'] == 'ACTIVE' else 'ACTIVE'
-        cursor.execute("UPDATE users SET status = ? WHERE username = ?", (new_status, username))
-        conn.commit()
-    conn.close()
-    return redirect('/manage_users')
-
-@app.route('/maker_receipts')
-def maker_receipts():
-    if 'role' not in session:
-        return redirect('/login')
-
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT txn_id, ft_reference, txn_type, customer_name, amount, status, timestamp, created_by 
-        FROM transactions 
-        ORDER BY timestamp DESC
-    """)
-    txns = cursor.fetchall()
-    conn.close()
-
-    rows_html = ""
-    for t in txns:
-        badge_cls = "badge-active" if t['status'] == 'APPROVED' else ("badge-danger" if 'REJECTED' in t['status'] else "badge-pending")
-        rows_html += f"""
-        <div class="item-card">
-            <div style="display:flex; justify-content:space-between; align-items:center;">
-                <span style="font-size:12px; font-weight:bold; color:#065f46;">{t['ft_reference']}</span>
-                <span class="badge {badge_cls}">{t['status']}</span>
-            </div>
-            <div style="font-size:13px; font-weight:bold; margin-top:4px;">{t['txn_type']}: {t['amount']:,.2f} Birr</div>
-            <div style="font-size:11px; color:#64748b;">Maammila: {t['customer_name']} | Maker: {t['created_by']} | Guyyaa: {t['timestamp']}</div>
-            <div style="text-align:right; margin-top:8px;">
-                <a href="/receipt/{t['txn_id']}" target="_blank" class="btn-action btn-green">🧾 Nagahee Maxxansi</a>
-            </div>
+            <div>{toggle_btn}</div>
         </div>
         """
 
     content = f"""
-    <h2 style="font-size: 16px; margin-bottom: 12px;">🧾 Nagahee Kaffaltii Baasuu</h2>
-    {rows_html if rows_html else "<p style='text-align:center; padding:20px; color:#64748b;'>Kaffaltiini galmaa'e hin jiru.</p>"}
-    """
-    return render_template_string(HTML_LAYOUT.replace("{% block content %}{% endblock %}", content), notifications=NOTIFICATIONS)
-
-@app.route('/transaction', methods=['GET', 'POST'])
-def transaction():
-    if 'role' not in session or session['role'] != 'MAKER':
-        return "🚫 Shoora MAKER qofatu kaffaltii uumuu danda'a", 403
-
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT customer_id, full_name, balance, freeze_status FROM customers WHERE status='ACTIVE'")
-    active_customers = cursor.fetchall()
-    conn.close()
-
-    msg = None
-    msg_color = "#dcfce7"
-    text_color = "#166534"
-
-    if request.method == 'POST':
-        txn_type = request.form.get('txn_type')
-        cust_id = request.form.get('customer_id')
-        target_acc = request.form.get('target_account', '').strip()
-        amount = float(request.form.get('amount', 0.0))
-        bank_name = request.form.get('bank_name', 'Imana Core')
-
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT full_name, balance, freeze_status FROM customers WHERE customer_id = ?", (cust_id,))
-        cust = cursor.fetchone()
-
-        if not cust:
-            msg = "❌ Maammilli hin argamne!"
-            msg_color, text_color = "#fee2e2", "#991b1b"
-        elif cust['freeze_status'] == 'FROZEN' and txn_type in ['WITHDRAWAL', 'T24_TRANSFER']:
-            msg = "🚫 Akkaawunttiin maammila kanaa UGGURAMEERA! Kaffaltii raawwachuun hin danda'amu."
-            msg_color, text_color = "#fee2e2", "#991b1b"
-        elif amount <= 0:
-            msg = "❌ Hangam maallaqaa sirrii galchaa!"
-            msg_color, text_color = "#fee2e2", "#991b1b"
-        else:
-            comm = get_commission(amount) if txn_type == 'WITHDRAWAL' else 0.0
-            if txn_type in ['WITHDRAWAL', 'T24_TRANSFER'] and cust['balance'] < (amount + comm):
-                msg = f"❌ Baalansiin maammilaa gahaa miti! Current Balance: {cust['balance']:,.2f} Birr"
-                msg_color, text_color = "#fee2e2", "#991b1b"
-            else:
-                timestamp_str = int(datetime.datetime.now().timestamp())
-                ft_ref = f"FT{datetime.datetime.now().strftime('%y%j')}{random.randint(10000, 99999)}"
-                now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-                cursor.execute("""
-                    INSERT INTO transactions (txn_id, txn_type, customer_id, customer_name, target_account, amount, commission, bank_name, ft_reference, status, created_by, timestamp)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING_MANAGER', ?, ?)
-                """, (f"TXN-{timestamp_str}", txn_type, cust_id, cust['full_name'], target_acc, amount, comm, bank_name, ft_ref, session['username'], now))
-                conn.commit()
-
-                msg = f"⏳ Kaffaltii {txn_type} ({amount:,.2f} Birr) uumameera! (FT Ref: {ft_ref}). Approval Manager eegaa jira."
-                add_notification(f"Maker transaction {ft_ref} uumeera.")
-
-        conn.close()
-
-    cust_options = "".join([f'<option value="{c["customer_id"]}">{c["full_name"]} (Acc: {c["customer_id"]}) - Bal: {c["balance"]:,.2f}</option>' for c in active_customers])
-
-    content = f"""
     <div class="box">
-        <h2 style="font-size: 16px; margin-bottom: 12px; color:#065f46;">💸 Deposit / Transfer / Withdraw (Maker)</h2>
-        {f"<p style='background:{msg_color}; color:{text_color}; padding:10px; border-radius:6px; font-size:12px; font-weight:bold; margin-bottom:12px;'>{msg}</p>" if msg else ""}
-        <form method="POST">
+        <h2 style="font-size: 16px; color:#6b21a8; margin-bottom: 4px;">⚙️ Bulchiinsa Hojjattootaa (CEO Admin)</h2>
+        <p style="font-size: 11px; color:#64748b; margin-bottom: 14px;">Hojjattoota haaraa galmeessi ykn akkaawunti ugguri/bani.</p>
+        
+        {f"<p style='background:#dcfce7; color:#166534; padding:10px; border-radius:6px; font-size:12px; font-weight:bold; margin-bottom:12px;'>{msg}</p>" if msg else ""}
+
+        <form method="POST" style="margin-bottom:20px;">
+            <input type="hidden" name="action" value="add_user">
             <div class="form-group">
-                <label>Gosa Kaffaltii (Transaction Type)</label>
-                <select name="txn_type" class="input-field" required>
-                    <option value="DEPOSIT">DEPOSIT (Maallaqa Galchuu)</option>
-                    <option value="WITHDRAWAL">WITHDRAWAL (Maallaqa Baasuu)</option>
-                    <option value="T24_TRANSFER">T24_TRANSFER (Qarshii Dabarsuu)</option>
+                <label>Username Hojjataa</label>
+                <input type="text" name="username" placeholder="Fkn: maker2" required class="input-field">
+            </div>
+            <div class="form-group">
+                <label>Password</label>
+                <input type="password" id="new_user_pwd" name="password" placeholder="Password" required class="input-field">
+                <span id="new_user_pwd_toggle" class="pwd-toggle" onclick="togglePasswordVisibility('new_user_pwd', 'new_user_pwd_toggle')">👁️</span>
+            </div>
+            <div class="form-group">
+                <label>Shoora (Role)</label>
+                <select name="role" class="input-field">
+                    <option value="MAKER">MAKER</option>
+                    <option value="MANAGER">MANAGER</option>
+                    <option value="AUDITOR">AUDITOR</option>
+                    <option value="LOAN_OFFICER">LOAN_OFFICER</option>
                 </select>
             </div>
-            <div class="form-group">
-                <label>Maammila Filadhu</label>
-                <select name="customer_id" class="input-field" required>
-                    {cust_options}
-                </select>
-            </div>
-            <div class="form-group">
-                <label>Target Acc (Transfer-af Qofa)</label>
-                <input type="text" name="target_account" placeholder="Acc Target..." class="input-field">
-            </div>
-            <div class="form-group">
-                <label>Hamma Qarshii (Amount in Birr)</label>
-                <input type="number" step="0.01" min="1" name="amount" required class="input-field">
-            </div>
-            <div class="form-group">
-                <label>Madda Baankii (Source Bank)</label>
-                <input type="text" name="bank_name" value="Imana Microfinance Core" class="input-field">
-            </div>
-            <button type="submit" class="btn-submit">Ergi (Create Transaction)</button>
+            <button type="submit" class="btn-submit" style="background:#6b21a8;">➕ Hojjataa Haaraa Galmeessi</button>
         </form>
+
+        <h3 style="font-size: 14px; margin-bottom: 8px; color: #334155;">📋 Listii Hojjattoota Systema</h3>
+        {users_html}
     </div>
     """
     return render_template_string(HTML_LAYOUT.replace("{% block content %}{% endblock %}", content), notifications=NOTIFICATIONS)
 
-if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=True)
