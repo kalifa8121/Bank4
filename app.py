@@ -547,6 +547,156 @@ def dashboard():
     """
     return render_template_string(HTML_LAYOUT.replace("{% block content %}{% endblock %}", content), notifications=NOTIFICATIONS)
 
+# --- MAKER TRANSACTION ROUTE (ADDED FIX) ---
+@app.route('/transaction', methods=['GET', 'POST'])
+def transaction():
+    if 'role' not in session or session['role'] != 'MAKER':
+        return "🚫 Shoora MAKER qofatu transaction raawwachuu danda'a", 403
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT customer_id, full_name, balance, freeze_status FROM customers WHERE status='ACTIVE'")
+    customers = cursor.fetchall()
+
+    msg = None
+    msg_type = "green"
+
+    if request.method == 'POST':
+        txn_type = request.form.get('txn_type')
+        cust_id = request.form.get('customer_id')
+        target_acc = request.form.get('target_account', '').strip()
+        amount = float(request.form.get('amount', 0.0))
+        bank_name = request.form.get('bank_name', 'Imana Microfinance Core')
+
+        cursor.execute("SELECT full_name, balance, freeze_status FROM customers WHERE customer_id = ?", (cust_id,))
+        cust = cursor.fetchone()
+
+        if not cust:
+            msg = "❌ Maammilli hin argamne!"
+            msg_type = "red"
+        elif cust['freeze_status'] == 'FROZEN' and txn_type in ['WITHDRAWAL', 'T24_TRANSFER']:
+            msg = "🔒 Akkaawuntiin maammila kanaa UGGURAMEERA! Baasii ykn Transfer gochuun hin danda'amu."
+            msg_type = "red"
+        elif amount <= 0:
+            msg = "❌ Hamma maallaqaa sirrii ta'e galchaa!"
+            msg_type = "red"
+        else:
+            commission = get_commission(amount) if txn_type == 'WITHDRAWAL' else 0.0
+            total_req = amount + commission
+
+            if txn_type in ['WITHDRAWAL', 'T24_TRANSFER'] and cust['balance'] < total_req:
+                msg = f"❌ Balansii gahaa miti! Balansii jiru: {cust['balance']:,.2f} Birr, Hamma Barbaadamu (fi commishina): {total_req:,.2f} Birr"
+                msg_type = "red"
+            else:
+                timestamp_str = int(datetime.datetime.now().timestamp())
+                ft_ref = f"FT{datetime.datetime.now().strftime('%y%j')}{random.randint(10000, 99999)}"
+                now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                txn_id = f"TXN-{timestamp_str}"
+
+                cursor.execute("""
+                    INSERT INTO transactions (txn_id, txn_type, customer_id, customer_name, target_account, amount, commission, bank_name, ft_reference, status, created_by, timestamp)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING_MANAGER', ?, ?)
+                """, (txn_id, txn_type, cust_id, cust['full_name'], target_acc, amount, commission, bank_name, ft_ref, session['username'], now))
+
+                conn.commit()
+                msg = f"✅ Transaction ({txn_type}) {amount:,.2f} Birr galmaa'eera (Ref: {ft_ref}). Approval Manager eegaa jira!"
+                add_notification(f"Maker transaction haaraa uumeera: {ft_ref} ({txn_type})")
+
+    conn.close()
+
+    cust_options = "".join([f'<option value="{c["customer_id"]}">{c["full_name"]} - {c["customer_id"]} (Bal: {c["balance"]:,.2f} Birr)</option>' for c in customers])
+
+    content = f"""
+    <div class="box">
+        <h2 style="font-size: 16px; color:#065f46; margin-bottom: 12px;">💸 Transaction Raawwadhu (Maker T24)</h2>
+        
+        {f"<p style='background:{'#dcfce7' if msg_type=='green' else '#fee2e2'}; color:{'#166534' if msg_type=='green' else '#991b1b'}; padding:10px; border-radius:6px; font-size:12px; font-weight:bold; margin-bottom:12px;'>{msg}</p>" if msg else ""}
+
+        <form method="POST">
+            <div class="form-group">
+                <label>Gosa Kaffaltii (Transaction Type)</label>
+                <select name="txn_type" id="txn_type" class="input-field" onchange="toggleTargetAcc()">
+                    <option value="DEPOSIT">📥 Deposit (Galii Maallaqaa)</option>
+                    <option value="WITHDRAWAL">📤 Withdrawal (Baasii Maallaqaa)</option>
+                    <option value="T24_TRANSFER">🔄 T24 Account Transfer (Akaawuntii irraa gara Akaawuntiitti)</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>Maammila Filadhu (Source Account)</label>
+                <select name="customer_id" required class="input-field">
+                    {cust_options}
+                </select>
+            </div>
+            <div class="form-group" id="target_acc_group" style="display:none;">
+                <label>Account ID Nama Fudhatuu (Target Account ID)</label>
+                <input type="text" name="target_account" placeholder="Fkn: 100099008801" class="input-field">
+            </div>
+            <div class="form-group">
+                <label>Hamma Maallaqaa (Amount in Birr)</label>
+                <input type="number" step="0.01" name="amount" placeholder="0.00" required class="input-field">
+            </div>
+            <div class="form-group">
+                <label>Moggaasa Baankii / Note</label>
+                <input type="text" name="bank_name" value="Imana Microfinance Core" class="input-field">
+            </div>
+            <button type="submit" class="btn-submit">⚡ Transaction Galmeessi (Send to Manager)</button>
+        </form>
+    </div>
+
+    <script>
+    function toggleTargetAcc() {{
+        var type = document.getElementById('txn_type').value;
+        var group = document.getElementById('target_acc_group');
+        if (type === 'T24_TRANSFER') {{
+            group.style.display = 'block';
+        }} else {{
+            group.style.display = 'none';
+        }}
+    }}
+    </script>
+    """
+    return render_template_string(HTML_LAYOUT.replace("{% block content %}{% endblock %}", content), notifications=NOTIFICATIONS)
+
+# --- MAKER RECEIPTS ROUTE (ADDED FIX) ---
+@app.route('/maker_receipts')
+def maker_receipts():
+    if 'role' not in session or session['role'] != 'MAKER':
+        return "🚫 Shoora MAKER qofa!", 403
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT txn_id, ft_reference, txn_type, customer_name, amount, status, timestamp 
+        FROM transactions 
+        WHERE created_by = ? 
+        ORDER BY timestamp DESC
+    """, (session['username'],))
+    txns = cursor.fetchall()
+    conn.close()
+
+    cards_html = ""
+    for t in txns:
+        badge_cls = "badge-active" if t['status'] == 'APPROVED' else ("badge-danger" if 'REJECTED' in t['status'] else "badge-pending")
+        cards_html += f"""
+        <div class="item-card">
+            <div style="display:flex; justify-content:space-between; align-items:center;">
+                <span style="font-size:12px; font-weight:bold; color:#065f46;">Ref: {t['ft_reference']}</span>
+                <span class="badge {badge_cls}">{t['status']}</span>
+            </div>
+            <div style="font-size:13px; font-weight:bold; margin-top:4px;">{t['txn_type']}: {t['amount']:,.2f} Birr</div>
+            <div style="font-size:11px; color:#64748b; margin-top:2px;">Maammila: {t['customer_name']} | {t['timestamp']}</div>
+            <div style="text-align:right; margin-top:8px;">
+                <a href="/receipt/{t['txn_id']}" target="_blank" class="btn-action btn-purple">🖨️ Nagahee Maxxansi</a>
+            </div>
+        </div>
+        """
+
+    content = f"""
+    <h2 style="font-size: 16px; margin-bottom: 12px; color:#065f46;">🧾 Nagaheewwan Kaffaltii (Maker Receipts)</h2>
+    {cards_html if cards_html else "<p style='text-align:center; padding:20px; color:#64748b; font-size:12px;'>Nagaheen galmaa'e hin jiru.</p>"}
+    """
+    return render_template_string(HTML_LAYOUT.replace("{% block content %}{% endblock %}", content), notifications=NOTIFICATIONS)
+
 # --- CEO PRIVATE VIEW: MUDARABA LIST & PROFIT SPLIT ---
 @app.route('/ceo_mudaraba_list')
 def ceo_mudaraba_list():
