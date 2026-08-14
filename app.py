@@ -915,6 +915,19 @@ def pending():
     """
     return render_template_string(HTML_LAYOUT.replace("{% block content %}{% endblock %}", content), notifications=NOTIFICATIONS)
 
+@app.route('/approve_cust/<cust_id>')
+def approve_cust(cust_id):
+    if 'role' not in session or session['role'] not in ['MANAGER', 'AUDITOR']:
+        return redirect('/login')
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE customers SET status = 'ACTIVE' WHERE customer_id = ?", (cust_id,))
+    conn.commit()
+    conn.close()
+    add_notification(f"Customer {cust_id} Manager'n ACTIVE ta'ee jira.")
+    return redirect('/pending')
+
 @app.route('/manager_action/<act>/<txn_id>')
 def manager_action(act, txn_id):
     if 'role' not in session or session['role'] not in ['MANAGER', 'AUDITOR']:
@@ -1363,6 +1376,127 @@ def customers():
     </div>
 
     {cust_html if cust_html else "<p style='text-align:center; color:#64748b; padding:20px; font-size:12px;'>Maammilli argame hin jiru.</p>"}
+    """
+    return render_template_string(HTML_LAYOUT.replace("{% block content %}{% endblock %}", content), notifications=NOTIFICATIONS)
+
+@app.route('/statement/<cust_id>')
+def statement(cust_id):
+    if 'role' not in session:
+        return redirect('/login')
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM customers WHERE customer_id = ?", (cust_id,))
+    c = cursor.fetchone()
+
+    if not c:
+        conn.close()
+        return "Maammilli Hin Argamne", 404
+
+    cursor.execute("""
+        SELECT txn_id, txn_type, amount, commission, ft_reference, status, created_by, timestamp
+        FROM transactions
+        WHERE customer_id = ? OR target_account = ?
+        ORDER BY timestamp DESC
+    """, (cust_id, cust_id))
+    txns = cursor.fetchall()
+    conn.close()
+
+    rows_html = ""
+    for t in txns:
+        badge_cls = "badge-active" if t['status'] == 'APPROVED' else ("badge-danger" if 'REJECTED' in t['status'] else "badge-pending")
+        rows_html += f"""
+        <tr style="border-bottom:1px solid #e2e8f0; font-size:11px;">
+            <td style="padding:8px;">{t['timestamp']}</td>
+            <td style="padding:8px; font-weight:bold;">{t['ft_reference']}</td>
+            <td style="padding:8px;">{t['txn_type']}</td>
+            <td style="padding:8px; font-weight:bold;">{t['amount']:,.2f}</td>
+            <td style="padding:8px;">{t['commission']:,.2f}</td>
+            <td style="padding:8px;"><span class="badge {badge_cls}">{t['status']}</span></td>
+        </tr>
+        """
+
+    content = f"""
+    <div class="box">
+        <h2 style="font-size: 16px; color:#065f46; margin-bottom:4px;">📜 Account Statement</h2>
+        <p style="font-size: 12px; font-weight:bold;">{c['full_name']} (Acc: {c['customer_id']})</p>
+        <p style="font-size: 11px; color:#64748b;">Haafe (Current Balance): <b style="color:#065f46;">{c['balance']:,.2f} Birr</b></p>
+    </div>
+
+    <div class="box" style="padding:0; overflow-x:auto;">
+        <table style="width:100%; border-collapse:collapse; text-align:left;">
+            <thead>
+                <tr style="background:#f8fafc; font-size:11px; color:#64748b; border-bottom:1px solid #e2e8f0;">
+                    <th style="padding:8px;">Guyyaa</th>
+                    <th style="padding:8px;">Ref</th>
+                    <th style="padding:8px;">Type</th>
+                    <th style="padding:8px;">Hamma</th>
+                    <th style="padding:8px;">Comm</th>
+                    <th style="padding:8px;">Status</th>
+                </tr>
+            </thead>
+            <tbody>
+                {rows_html if rows_html else '<tr><td colspan="6" style="padding:16px; text-align:center; color:#64748b;">Transaction-ni socho\'e hin jiru.</td></tr>'}
+            </tbody>
+        </table>
+    </div>
+    """
+    return render_template_string(HTML_LAYOUT.replace("{% block content %}{% endblock %}", content), notifications=NOTIFICATIONS)
+
+@app.route('/ceo_commission')
+def ceo_commission():
+    if 'role' not in session or session['role'] != 'CEO':
+        return "🚫 Hayyama CEO Qofa!", 403
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT SUM(commission) FROM transactions WHERE status='APPROVED'")
+    total_comm = cursor.fetchone()[0] or 0.0
+
+    cursor.execute("""
+        SELECT txn_id, ft_reference, customer_name, amount, commission, created_by, timestamp
+        FROM transactions
+        WHERE status='APPROVED' AND commission > 0
+        ORDER BY timestamp DESC
+    """)
+    comm_txns = cursor.fetchall()
+    conn.close()
+
+    rows_html = ""
+    for t in comm_txns:
+        rows_html += f"""
+        <tr style="border-bottom:1px solid #e2e8f0; font-size:11px;">
+            <td style="padding:8px;">{t['timestamp']}</td>
+            <td style="padding:8px; font-weight:bold;">{t['ft_reference']}</td>
+            <td style="padding:8px;">{t['customer_name']}</td>
+            <td style="padding:8px;">{t['amount']:,.2f}</td>
+            <td style="padding:8px; font-weight:bold; color:#065f46;">+{t['commission']:,.2f}</td>
+        </tr>
+        """
+
+    content = f"""
+    <div class="card-ceo-profit">
+        <div class="net-title">💰 Waliigala Comishina Baasii Kuufame</div>
+        <div class="net-amount">{total_comm:,.2f} Birr</div>
+    </div>
+
+    <h3 style="font-size:14px; margin-bottom:8px; color:#334155;">📋 Tarree Kaffaltii Comishina Baasii</h3>
+    <div class="box" style="padding:0; overflow-x:auto;">
+        <table style="width:100%; border-collapse:collapse; text-align:left;">
+            <thead>
+                <tr style="background:#f8fafc; font-size:11px; color:#64748b; border-bottom:1px solid #e2e8f0;">
+                    <th style="padding:8px;">Guyyaa</th>
+                    <th style="padding:8px;">Ref</th>
+                    <th style="padding:8px;">Maammila</th>
+                    <th style="padding:8px;">Withdraw Amount</th>
+                    <th style="padding:8px;">Commission</th>
+                </tr>
+            </thead>
+            <tbody>
+                {rows_html if rows_html else '<tr><td colspan="5" style="padding:16px; text-align:center; color:#64748b;">Comishinni kaffalame hin jiru.</td></tr>'}
+            </tbody>
+        </table>
+    </div>
     """
     return render_template_string(HTML_LAYOUT.replace("{% block content %}{% endblock %}", content), notifications=NOTIFICATIONS)
 
@@ -1953,109 +2087,10 @@ def api_get_customer(cust_id):
     cursor.execute("SELECT full_name FROM customers WHERE customer_id = ?", (cust_id,))
     row = cursor.fetchone()
     conn.close()
+
     if row:
         return jsonify({'success': True, 'full_name': row['full_name']})
-    return jsonify({'success': False, 'full_name': 'Akkaawuntiin Hin Argamne!'})
-
-@app.route('/approve_cust/<cust_id>')
-def approve_cust(cust_id):
-    if 'role' not in session or session['role'] not in ['MANAGER', 'AUDITOR']:
-        return redirect('/login')
-
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("UPDATE customers SET status = 'ACTIVE' WHERE customer_id = ?", (cust_id,))
-    cursor.execute("SELECT phone, full_name FROM customers WHERE customer_id = ?", (cust_id,))
-    c_info = cursor.fetchone()
-    conn.commit()
-    conn.close()
-
-    if c_info:
-        send_sms_alert(c_info['phone'], f"Kabajamoo {c_info['full_name']}, Akkaawuntiin keessan ({cust_id}) ACTIVE ta'ee jira!")
-        add_notification(f"Customer {c_info['full_name']} ({cust_id}) ACTIVE ta'ee jira.")
-
-    return redirect('/pending')
-
-@app.route('/statement/<cust_id>')
-def statement(cust_id):
-    if 'role' not in session:
-        return redirect('/login')
-
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT customer_id, full_name, phone, gender, account_type, balance, status FROM customers WHERE customer_id = ?", (cust_id,))
-    cust = cursor.fetchone()
-
-    if not cust:
-        conn.close()
-        return "Maammilli Hin Argamne", 404
-
-    cursor.execute("""
-        SELECT txn_id, ft_reference, txn_type, amount, commission, status, timestamp, created_by, customer_id, target_account
-        FROM transactions 
-        WHERE (customer_id = ? OR target_account = ?) AND status = 'APPROVED'
-        ORDER BY timestamp ASC
-    """, (cust_id, cust_id))
-    txns = cursor.fetchall()
-    conn.close()
-
-    rows_html = ""
-    running_balance = 0.0
-
-    for t in txns:
-        amt = t['amount']
-        comm = t['commission']
-        t_type = t['txn_type']
-        
-        if t_type == 'DEPOSIT':
-            running_balance += amt
-        elif t_type == 'WITHDRAWAL':
-            running_balance -= (amt + comm)
-        elif t_type == 'T24_TRANSFER':
-            if t['customer_id'] == cust_id:
-                running_balance -= amt
-            else:
-                running_balance += amt
-
-        running_balance = max(0.0, running_balance)
-
-        rows_html += f"""
-        <tr style="border-bottom:1px solid #e2e8f0; font-size:11px;">
-            <td style="padding:8px;">{t['timestamp']}</td>
-            <td style="padding:8px; font-weight:bold;">{t['ft_reference']}</td>
-            <td style="padding:8px;">{t_type}</td>
-            <td style="padding:8px; font-weight:bold;">{amt:,.2f} Birr</td>
-            <td style="padding:8px; font-weight:bold; color:#065f46;">{running_balance:,.2f} Birr</td>
-            <td style="padding:8px;">{t['created_by']}</td>
-        </tr>
-        """
-
-    content = f"""
-    <div class="box">
-        <h2 style="font-size: 16px; margin-bottom: 4px;">📜 Statement Maammilaa (Running Balance)</h2>
-        <p style="font-size: 13px; color:#065f46; font-weight:bold;">{cust['full_name']} ({cust['gender']} | {cust['account_type']}) - Acc: {cust['customer_id']}</p>
-        <p style="font-size: 11px; color:#64748b;">📞 {cust['phone']} | Balance Dhumaa: <b style="color:#16a34a;">{running_balance:,.2f} Birr</b></p>
-    </div>
-
-    <div class="box" style="padding:0; overflow-x:auto;">
-        <table style="width:100%; border-collapse:collapse; text-align:left;">
-            <thead>
-                <tr style="background:#f8fafc; font-size:11px; color:#64748b; border-bottom:1px solid #e2e8f0;">
-                    <th style="padding:8px;">Guyyaa</th>
-                    <th style="padding:8px;">FT Ref</th>
-                    <th style="padding:8px;">Gosa</th>
-                    <th style="padding:8px;">Hamma</th>
-                    <th style="padding:8px;">Balance</th>
-                    <th style="padding:8px;">By</th>
-                </tr>
-            </thead>
-            <tbody>
-                {rows_html if rows_html else '<tr><td colspan="6" style="padding:16px; text-align:center; color:#64748b;">Transaction-ni socho'e hin jiru.</td></tr>'}
-            </tbody>
-        </table>
-    </div>
-    """
-    return render_template_string(HTML_LAYOUT.replace("{% block content %}{% endblock %}", content), notifications=NOTIFICATIONS)
+    return jsonify({'success': False, 'full_name': 'Akkaawuntiin hin argamne!'})
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
