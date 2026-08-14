@@ -69,7 +69,7 @@ def add_notification(message):
     if len(NOTIFICATIONS) > 20:
         NOTIFICATIONS.pop()
 
-# --- AUTO BACKUP & AUTO RESTORE MECHANISM FOR RENDER PERSISTENCE ---
+# --- AUTO BACKUP & AUTO RESTORE MECHANISM FOR RENDER PERSISTENCE (24 HR SUPPORT) ---
 def perform_auto_backup():
     try:
         now_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -98,7 +98,7 @@ def perform_auto_restore():
 perform_auto_restore()
 atexit.register(perform_auto_backup)
 
-# --- DATABASE SETUP ---
+# --- DATABASE SETUP & AUTO MIGRATION ---
 def init_db():
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -128,6 +128,8 @@ def init_db():
             customer_id TEXT PRIMARY KEY,
             full_name TEXT,
             phone TEXT,
+            gender TEXT DEFAULT 'Dhiira',
+            account_type TEXT DEFAULT 'WADIA',
             photo_path TEXT,
             signature_path TEXT,
             national_id_path TEXT DEFAULT '',
@@ -138,7 +140,16 @@ def init_db():
             created_at TEXT
         )
     """)
-    
+
+    # Auto Migration for older DB versions without gender / account_type
+    try:
+        cursor.execute("ALTER TABLE customers ADD COLUMN gender TEXT DEFAULT 'Dhiira'")
+    except sqlite3.OperationalError: pass
+
+    try:
+        cursor.execute("ALTER TABLE customers ADD COLUMN account_type TEXT DEFAULT 'WADIA'")
+    except sqlite3.OperationalError: pass
+
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS transactions (
             txn_id TEXT PRIMARY KEY,
@@ -170,7 +181,7 @@ def init_db():
         )
     """)
 
-    # Table for Mudaraba / Murabaha Financing
+    # Table for Mudaraba / Murabaha Financing & Loans
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS islamic_financing (
             loan_id TEXT PRIMARY KEY,
@@ -210,10 +221,19 @@ def get_bank_capital():
 
     cursor.execute("SELECT SUM(commission) FROM transactions WHERE status='APPROVED'")
     total_commission = cursor.fetchone()[0] or 0.0
+
+    # Calculate Mudaraba 50/50 Profit Split
+    cursor.execute("SELECT SUM(balance) FROM customers WHERE status='ACTIVE' AND account_type='MUDARABA'")
+    total_mudaraba_deposits = cursor.fetchone()[0] or 0.0
+
+    # 10% Estimated Gross Annual Return on Mudaraba pool
+    mudaraba_gross_profit = total_mudaraba_deposits * 0.10
+    mudaraba_ceo_share = mudaraba_gross_profit * 0.50
+    mudaraba_customer_share = mudaraba_gross_profit * 0.50
     
     net_capital = total_deposit - total_withdraw + total_commission
     conn.close()
-    return max(0.0, net_capital), total_deposit, total_withdraw, total_cust_balance, total_commission
+    return max(0.0, net_capital), total_deposit, total_withdraw, total_cust_balance, total_commission, total_mudaraba_deposits, mudaraba_gross_profit, mudaraba_ceo_share, mudaraba_customer_share
 
 # --- UI TEMPLATE ---
 HTML_LAYOUT = """
@@ -236,6 +256,7 @@ HTML_LAYOUT = """
         .notification-bar { background: #fef3c7; color: #92400e; padding: 8px 12px; border-radius: 8px; font-size: 11px; margin-bottom: 12px; font-weight: bold; border: 1px solid #fde68a; }
 
         .card-net { background: linear-gradient(135deg, #064e3b, #047857); color: white; border-radius: 16px; padding: 20px; box-shadow: 0 10px 15px -3px rgba(6,78,59,0.3); margin-bottom: 20px; }
+        .card-ceo-profit { background: linear-gradient(135deg, #4c1d95, #6b21a8); color: white; border-radius: 16px; padding: 20px; box-shadow: 0 10px 15px -3px rgba(76,29,149,0.3); margin-bottom: 20px; }
         .net-title { font-size: 12px; opacity: 0.9; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
         .net-amount { font-size: 32px; font-weight: 800; color: #fbbf24; }
         .net-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 16px; pt: 12px; border-top: 1px solid rgba(255,255,255,0.2); font-size: 12px; }
@@ -263,6 +284,7 @@ HTML_LAYOUT = """
         .badge-active { background: #dcfce7; color: #166534; }
         .badge-danger { background: #fee2e2; color: #991b1b; }
         .badge-frozen { background: #dbeafe; color: #1e40af; border: 1px solid #93c5fd; }
+        .badge-mudaraba { background: #f3e8ff; color: #6b21a8; border: 1px solid #d8b4fe; }
         
         .item-card { background: white; border-radius: 12px; padding: 14px; margin-bottom: 12px; border: 1px solid #e2e8f0; }
         .img-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; margin: 10px 0; }
@@ -322,7 +344,6 @@ HTML_LAYOUT = """
         {% if session['role'] == 'AUDITOR' %}
             <a href="/pending"><span class="icon">📋</span>Auditor View</a>
             <a href="/auditor_reversal_request"><span class="icon">⚠️</span>Reversal Gaafachu</a>
-            <a href="/auditor_close"><span class="icon">🔒</span>Cufiinsa</a>
         {% endif %}
         {% if session['role'] in ['LOAN_OFFICER', 'CEO', 'MANAGER'] %}
             <a href="/islamic_loan"><span class="icon">📜</span>Liqaa Islaamaa</a>
@@ -414,7 +435,7 @@ def dashboard():
     if 'role' not in session:
         return redirect('/login')
     
-    net_cap, deposits, withdraws, cust_bal, total_comm = get_bank_capital()
+    net_cap, deposits, withdraws, cust_bal, total_comm, mud_dep, mud_gross, mud_ceo, mud_cust = get_bank_capital()
     role = session['role']
 
     maker_btns = ""
@@ -437,7 +458,6 @@ def dashboard():
         auditor_btns = """
         <a href="/pending" class="btn-card btn-card-auditor"><span class="icon">📋</span><span>View Maammilaa & Approve</span></a>
         <a href="/auditor_reversal_request" class="btn-card btn-card-auditor"><span class="icon">⚠️</span><span>Transaction Reversal Gaafachu</span></a>
-        <a href="/auditor_close" class="btn-card btn-card-auditor"><span class="icon">🔒</span><span>Cufiinsa Herrega Galgalaa</span></a>
         """
 
     loan_btn = ""
@@ -447,17 +467,30 @@ def dashboard():
         """
 
     ceo_btn = ""
+    ceo_mudaraba_dashboard = ""
     if role == 'CEO':
+        ceo_mudaraba_dashboard = f"""
+        <div class="card-ceo-profit">
+            <div class="net-title">📊 CEO Private View: Mudaraba 50/50 Profit Share</div>
+            <div class="net-amount">{mud_ceo:,.2f} Birr</div>
+            <p style="font-size:11px; opacity:0.9; margin-top:4px;">Qoodda Bu'aa Baankii/CEO (50% Share)</p>
+            <div class="net-grid">
+                <div>📈 Waliigala Kuusaa Mudaraba: <b>{mud_dep:,.2f} Birr</b></div>
+                <div>🤝 Qoodda Maammiltootaa (50%): <b>{mud_cust:,.2f} Birr</b></div>
+            </div>
+        </div>
+        """
         ceo_btn = """
         <a href="/ceo_commission" class="btn-card btn-card-ceo"><span class="icon">💰</span><span>Comishina Guyyaa</span></a>
         <a href="/ceo_blank_form" target="_blank" class="btn-card btn-card-ceo"><span class="icon">🖨️</span><span>Formii Duwwaa Maxxansi</span></a>
         <a href="/reversals_list" class="btn-card btn-card-ceo"><span class="icon">🔄</span><span>CEO Reversal Approval</span></a>
         <a href="/manage_users" class="btn-card btn-card-ceo"><span class="icon">⚙️</span><span>Bulchiinsa Hojjattootaa</span></a>
         <a href="/ceo_backup" class="btn-card btn-card-ceo"><span class="icon">💾</span><span>Save / Restore DB</span></a>
-        <a href="/ceo_audit" class="btn-card btn-card-ceo"><span class="icon">🌙</span><span>CEO Audit & Reports</span></a>
         """
 
     content = f"""
+    {ceo_mudaraba_dashboard}
+
     <div class="card-net">
         <div class="net-title">Waliigala Kaabitaala Baankii (Net Capital)</div>
         <div class="net-amount">{net_cap:,.2f} Birr</div>
@@ -498,6 +531,8 @@ def edit_customer(cust_id):
     if request.method == 'POST':
         full_name = request.form.get('full_name').strip()
         phone = request.form.get('phone').strip()
+        gender = request.form.get('gender')
+        account_type = request.form.get('account_type')
 
         photo_file = request.files.get('photo')
         sig_file = request.files.get('signature')
@@ -523,9 +558,9 @@ def edit_customer(cust_id):
 
         cursor.execute("""
             UPDATE customers 
-            SET full_name = ?, phone = ?, photo_path = ?, signature_path = ?, national_id_path = ?
+            SET full_name = ?, phone = ?, gender = ?, account_type = ?, photo_path = ?, signature_path = ?, national_id_path = ?
             WHERE customer_id = ?
-        """, (full_name, phone, photo_filename, sig_filename, nat_id_filename, cust_id))
+        """, (full_name, phone, gender, account_type, photo_filename, sig_filename, nat_id_filename, cust_id))
         conn.commit()
         
         cursor.execute("SELECT * FROM customers WHERE customer_id = ?", (cust_id,))
@@ -553,6 +588,20 @@ def edit_customer(cust_id):
                 <label>Lakkoofsa Bilbilaa</label>
                 <input type="text" name="phone" value="{customer['phone']}" required class="input-field">
             </div>
+            <div class="form-group">
+                <label>Saala (Gender)</label>
+                <select name="gender" class="input-field">
+                    <option value="Dhiira" {'selected' if customer['gender']=='Dhiira' else ''}>Dhiira</option>
+                    <option value="Dubartii" {'selected' if customer['gender']=='Dubartii' else ''}>Dubartii</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>Gosa Akkaawuntii (Account Scheme)</label>
+                <select name="account_type" class="input-field">
+                    <option value="WADIA" {'selected' if customer['account_type']=='WADIA' else ''}>A, Wadia Savings (Yeroo Gabaabduu / Faaydaa Malee)</option>
+                    <option value="MUDARABA" {'selected' if customer['account_type']=='MUDARABA' else ''}>B, Mudaraba Investment (50%, 50% Profit Share)</option>
+                </select>
+            </div>
             
             <div class="form-group">
                 <label>📸 Suuraa Fuulaa Jijjiiri (Optional)</label>
@@ -576,7 +625,7 @@ def edit_customer(cust_id):
     """
     return render_template_string(HTML_LAYOUT.replace("{% block content %}{% endblock %}", content), notifications=NOTIFICATIONS)
 
-# --- MUDARABA & MURABAHA FINANCING ROUTE WITH MANAGER & CEO APPROVAL ---
+# --- ISLAMIC FINANCING (MUDARABA & MURABAHA) WITH MANAGER & CEO APPROVAL ---
 @app.route('/islamic_loan', methods=['GET', 'POST'])
 def islamic_loan():
     if 'role' not in session or session['role'] not in ['LOAN_OFFICER', 'CEO', 'MANAGER']:
@@ -600,7 +649,7 @@ def islamic_loan():
         cust_row = cursor.fetchone()
         cust_name = cust_row['full_name'] if cust_row else "Unknown"
 
-        # Islamic Banking Calculations
+        # Islamic Calculations
         profit_amount = principal * (profit_rate / 100.0)
         total_repayment = principal + profit_amount
         monthly_installment = total_repayment / tenure if tenure > 0 else total_repayment
@@ -654,7 +703,7 @@ def islamic_loan():
                 Kaabitaala: <b>{l['principal_amount']:,.2f} Birr</b> | Dhala/Gabbii: <b>{l['profit_margin']:,.2f} Birr</b><br>
                 Waliigala Deebi'u: <b>{l['total_repayment']:,.2f} Birr</b> | Baatiitti: <b>{l['monthly_installment']:,.2f} Birr ({l['tenure_months']} Baatii)</b>
             </div>
-            {f'<div style="font-size:10px; color:#64748b; margin-top:4px;">Yaada: {l["agent_notes"]}</div>' if l['agent_notes'] else ''}
+            {f'<div style="font-size:10px; color:#64748b; margin-top:4px;">Yaada Analysis: {l["agent_notes"]}</div>' if l['agent_notes'] else ''}
             {approval_actions}
         </div>
         """
@@ -707,7 +756,6 @@ def islamic_loan():
     """
     return render_template_string(HTML_LAYOUT.replace("{% block content %}{% endblock %}", content), notifications=NOTIFICATIONS)
 
-# --- APPROVE/REJECT ROUTE FOR ISLAMIC LOAN ---
 @app.route('/approve_loan/<role_type>/<loan_id>')
 def approve_loan(role_type, loan_id):
     if 'role' not in session or session['role'] not in ['MANAGER', 'CEO']:
@@ -727,7 +775,6 @@ def approve_loan(role_type, loan_id):
         add_notification(f"Manager loan_id {loan_id} approve godheera. CEO approval eegaa jira.")
     elif role_type == 'ceo' and session['role'] == 'CEO':
         cursor.execute("UPDATE islamic_financing SET status = 'APPROVED', ceo_approved = 1 WHERE loan_id = ?", (loan_id,))
-        # Add loan principal amount to customer's active balance
         cursor.execute("UPDATE customers SET balance = balance + ? WHERE customer_id = ?", (loan['principal_amount'], loan['customer_id']))
         add_notification(f"CEO loan_id {loan_id} FINAL APPROVED! Maallaqni maammilaaf dhangala'eera.")
 
@@ -756,14 +803,14 @@ def pending():
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    cursor.execute("SELECT customer_id, full_name, phone, photo_path, signature_path, national_id_path FROM customers WHERE status='PENDING_APPROVAL'")
+    cursor.execute("SELECT customer_id, full_name, phone, gender, account_type, photo_path, signature_path, national_id_path FROM customers WHERE status='PENDING_APPROVAL'")
     pending_custs = cursor.fetchall()
 
     cursor.execute("""
         SELECT 
             t.txn_id, t.txn_type, t.customer_name, t.amount, t.bank_name, t.status,
             c.photo_path, c.signature_path, c.national_id_path, c.phone, t.customer_id, t.ft_reference, t.target_account, t.commission,
-            c.freeze_status, c.freeze_reason
+            c.freeze_status, c.freeze_reason, c.gender, c.account_type
         FROM transactions t
         LEFT JOIN customers c ON t.customer_id = c.customer_id
         WHERE t.status = 'PENDING_MANAGER'
@@ -782,9 +829,13 @@ def pending():
             <div class="item-card" style="background:#eff6ff; border-color:#bfdbfe;">
                 <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
                     <span style="font-size:12px; font-weight:bold; color:#1e3a8a;">Acc: {c['customer_id']}</span>
-                    <span class="badge badge-pending">PENDING</span>
+                    <div>
+                        <span class="badge badge-mudaraba">{c['account_type']}</span>
+                        <span class="badge badge-pending">PENDING</span>
+                    </div>
                 </div>
-                <div style="font-size:13px; font-weight:bold; margin-bottom:6px;">Maqaa: {c['full_name']} (📞 {c['phone']})</div>
+                <div style="font-size:13px; font-weight:bold; margin-bottom:2px;">Maqaa: {c['full_name']} (📞 {c['phone']})</div>
+                <div style="font-size:11px; color:#475569; margin-bottom:6px;">Saala: <b>{c['gender']}</b></div>
                 <div class="img-grid">
                     <div style="text-align:center;"><img src="/uploads/{c['photo_path']}"><span style="font-size:10px; color:#64748b;">Fuula</span></div>
                     <div style="text-align:center;"><img src="/uploads/{c['signature_path']}"><span style="font-size:10px; color:#1e40af; font-weight:bold;">Mallattoo ✍️</span></div>
@@ -1163,6 +1214,7 @@ def ceo_backup():
                     test_conn.close()
 
                     shutil.copyfile(temp_path, DB_PATH)
+                    init_db() # Run auto-migration check on restored DB
                     if os.path.exists(temp_path):
                         os.remove(temp_path)
                     msg = "✅ Database-ni milkaa'inaan deebi'eera (Restore Complete)!"
@@ -1230,10 +1282,10 @@ def customers():
     conn = get_db_connection()
     cursor = conn.cursor()
     if search_query:
-        cursor.execute("SELECT customer_id, full_name, phone, photo_path, balance, status, freeze_status, freeze_reason FROM customers WHERE full_name LIKE ? OR phone LIKE ? OR customer_id LIKE ?", 
+        cursor.execute("SELECT customer_id, full_name, phone, gender, account_type, photo_path, balance, status, freeze_status, freeze_reason FROM customers WHERE full_name LIKE ? OR phone LIKE ? OR customer_id LIKE ?", 
                        (f"%{search_query}%", f"%{search_query}%", f"%{search_query}%"))
     else:
-        cursor.execute("SELECT customer_id, full_name, phone, photo_path, balance, status, freeze_status, freeze_reason FROM customers")
+        cursor.execute("SELECT customer_id, full_name, phone, gender, account_type, photo_path, balance, status, freeze_status, freeze_reason FROM customers")
     rows = cursor.fetchall()
     conn.close()
 
@@ -1279,8 +1331,9 @@ def customers():
             <img src="{photo}" style="width:48px; height:48px; border-radius:50%; object-fit:cover; margin-right:12px; border:1px solid #cbd5e1;">
             <div style="width:100%;">
                 <div style="display:flex; justify-content:space-between; align-items:center;">
-                    <h4 style="font-size:13px; font-weight:bold;">{r['full_name']}</h4>
+                    <h4 style="font-size:13px; font-weight:bold;">{r['full_name']} ({r['gender']})</h4>
                     <div>
+                        <span class="badge badge-mudaraba">{r['account_type']}</span>
                         <span class="badge {badge_cls}">{r['status']}</span>
                         {freeze_badge}
                     </div>
@@ -1444,6 +1497,8 @@ def print_customer_form(cust_id):
 
         <div class="field"><b>Lakkoofsa Akkaawuntii (T24 ID):</b> {c['customer_id']}</div>
         <div class="field"><b>Maqaa Guutuu:</b> {c['full_name']}</div>
+        <div class="field"><b>Saala (Gender):</b> {c['gender']}</div>
+        <div class="field"><b>Gosa Akkaawuntii:</b> {c['account_type']}</div>
         <div class="field"><b>Lakkoofsa Bilbilaa:</b> {c['phone']}</div>
         <div class="field"><b>Balansii Jalqabaa:</b> {c['balance']:,.2f} Birr</div>
         <div class="field"><b>Status Akkaawuntii:</b> {c['status']}</div>
@@ -1651,6 +1706,8 @@ def register():
     if request.method == 'POST':
         full_name = request.form.get('full_name').strip()
         phone = request.form.get('phone').strip()
+        gender = request.form.get('gender')
+        account_type = request.form.get('account_type')
         initial_balance = max(0.0, float(request.form.get('initial_balance', 0.0)))
         photo_file = request.files.get('photo')
         sig_file = request.files.get('signature')
@@ -1684,9 +1741,9 @@ def register():
             now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
             cursor.execute("""
-                INSERT INTO customers (customer_id, full_name, phone, photo_path, signature_path, national_id_path, balance, status, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING_APPROVAL', ?)
-            """, (cust_id, full_name, phone, photo_filename, sig_filename, nat_id_filename, initial_balance, now))
+                INSERT INTO customers (customer_id, full_name, phone, gender, account_type, photo_path, signature_path, national_id_path, balance, status, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING_APPROVAL', ?)
+            """, (cust_id, full_name, phone, gender, account_type, photo_filename, sig_filename, nat_id_filename, initial_balance, now))
 
             if initial_balance > 0:
                 ft_ref = f"FT{datetime.datetime.now().strftime('%y%j')}{random.randint(10000, 99999)}"
@@ -1697,7 +1754,7 @@ def register():
 
             conn.commit()
             conn.close()
-            msg = f"⏳ Maammilli {full_name} (Initial Balance: {initial_balance:,.2f} Birr) galmaa'eera! (T24 Acc: {cust_id}). MANAGER'n ACTIVE akka ta'u mirkaneessuu qaba."
+            msg = f"⏳ Maammilli {full_name} ({account_type} / {gender}) galmaa'eera! (T24 Acc: {cust_id}). MANAGER'n ACTIVE akka ta'u mirkaneessuu qaba."
             add_notification(f"Galmeen maammila haaraa ({full_name}) raawwatameera.")
 
     content = f"""
@@ -1708,6 +1765,20 @@ def register():
             <div class="form-group">
                 <label>Maqaa Guutuu</label>
                 <input type="text" name="full_name" required class="input-field">
+            </div>
+            <div class="form-group">
+                <label>Saala (Sex / Gender)</label>
+                <select name="gender" class="input-field" required>
+                    <option value="Dhiira">Dhiira (Male)</option>
+                    <option value="Dubartii">Dubartii (Female)</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>Gosa Akkaawuntii (Account Scheme)</label>
+                <select name="account_type" class="input-field" required>
+                    <option value="WADIA">A, Wadia Savings (Yeroo Gabaabduu / Faaydaa Malee)</option>
+                    <option value="MUDARABA">B, Mudaraba Investment (50%, 50% Profit Share)</option>
+                </select>
             </div>
             <div class="form-group">
                 <label>Lakkoofsa Bilbilaa</label>
@@ -1912,7 +1983,7 @@ def statement(cust_id):
 
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT customer_id, full_name, phone, balance, status FROM customers WHERE customer_id = ?", (cust_id,))
+    cursor.execute("SELECT customer_id, full_name, phone, gender, account_type, balance, status FROM customers WHERE customer_id = ?", (cust_id,))
     cust = cursor.fetchone()
 
     if not cust:
@@ -1962,92 +2033,24 @@ def statement(cust_id):
     content = f"""
     <div class="box">
         <h2 style="font-size: 16px; margin-bottom: 4px;">📜 Statement Maammilaa (Running Balance)</h2>
-        <p style="font-size: 13px; color:#065f46; font-weight:bold;">{cust['full_name']} (Acc: {cust['customer_id']})</p>
-        <p style="font-size: 11px; color:#64748b;">📞 {cust['phone']} | Balance Dhumaa (Final Balance): <b style="color:#16a34a;">{running_balance:,.2f} Birr</b></p>
+        <p style="font-size: 13px; color:#065f46; font-weight:bold;">{cust['full_name']} ({cust['gender']} | {cust['account_type']}) - Acc: {cust['customer_id']}</p>
+        <p style="font-size: 11px; color:#64748b;">📞 {cust['phone']} | Balance Dhumaa: <b style="color:#16a34a;">{running_balance:,.2f} Birr</b></p>
     </div>
 
     <div class="box" style="padding:0; overflow-x:auto;">
         <table style="width:100%; border-collapse:collapse; text-align:left;">
             <thead>
-                <tr style="background:#f8fafc; font-size:10px; color:#64748b; border-bottom:1px solid #e2e8f0;">
+                <tr style="background:#f8fafc; font-size:11px; color:#64748b; border-bottom:1px solid #e2e8f0;">
                     <th style="padding:8px;">Guyyaa</th>
-                    <th style="padding:8px;">Ref</th>
+                    <th style="padding:8px;">FT Ref</th>
                     <th style="padding:8px;">Gosa</th>
                     <th style="padding:8px;">Hamma</th>
-                    <th style="padding:8px;">Running Balansii</th>
-                    <th style="padding:8px;">Maker</th>
+                    <th style="padding:8px;">Balance</th>
+                    <th style="padding:8px;">By</th>
                 </tr>
             </thead>
             <tbody>
-                {rows_html if rows_html else "<tr><td colspan='6' style='padding:16px; text-align:center; font-size:12px; color:#94a3b8;'>Transaction-ni APPROVED ta'e hin jiru</td></tr>"}
-            </tbody>
-        </table>
-    </div>
-    """
-    return render_template_string(HTML_LAYOUT.replace("{% block content %}{% endblock %}", content), notifications=NOTIFICATIONS)
-
-@app.route('/ceo_commission')
-def ceo_commission():
-    if 'role' not in session or session['role'] != 'CEO':
-        return "🚫 Hayyama CEO Qofa!", 403
-
-    search_date = request.args.get('search_date', datetime.datetime.now().strftime("%Y-%m-%d"))
-
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT ft_reference, txn_type, customer_name, amount, commission, created_by, timestamp 
-        FROM transactions 
-        WHERE timestamp LIKE ? AND status='APPROVED' AND commission > 0
-        ORDER BY timestamp DESC
-    """, (f"{search_date}%",))
-    rows = cursor.fetchall()
-
-    cursor.execute("SELECT SUM(commission) FROM transactions WHERE status='APPROVED' AND timestamp LIKE ?", (f"{search_date}%",))
-    daily_commission = cursor.fetchone()[0] or 0.0
-    conn.close()
-
-    comm_html = "".join([f"""
-    <tr style="border-bottom:1px solid #e2e8f0; font-size:11px;">
-        <td style="padding:8px; font-weight:bold; color:#581c87;">{r['ft_reference']}</td>
-        <td style="padding:8px;">{r['customer_name']}</td>
-        <td style="padding:8px;">{r['amount']:,.2f} Birr</td>
-        <td style="padding:8px; color:#16a34a; font-weight:bold;">+{r['commission']:,.2f} Birr</td>
-        <td style="padding:8px;">{r['created_by']}</td>
-        <td style="padding:8px;">{r['timestamp']}</td>
-    </tr>
-    """ for r in rows])
-
-    content = f"""
-    <div style="background:#065f46; color:white; border-radius:16px; padding:20px; margin-bottom:20px;">
-        <h2 style="font-size:18px;">💰 Gabaasa Comishinii Guyyaa (CEO)</h2>
-        <p style="font-size:11px; opacity:0.8;">Guyyaa Filatame: <b>{search_date}</b></p>
-        <div style="margin-top:10px; font-size:24px; font-weight:bold; color:#fbbf24;">
-            Waliigala Comishinii: {daily_commission:,.2f} Birr
-        </div>
-    </div>
-
-    <div class="box">
-        <form method="GET" action="/ceo_commission" style="display:flex; gap:8px;">
-            <input type="date" name="search_date" value="{search_date}" class="input-field" style="margin:0;">
-            <button type="submit" class="btn-submit" style="width:auto; padding:0 16px; background:#065f46;">Barbaadi</button>
-        </form>
-    </div>
-
-    <div class="box" style="padding:0; overflow-x:auto;">
-        <table style="width:100%; border-collapse:collapse; text-align:left;">
-            <thead>
-                <tr style="background:#f8fafc; font-size:10px; color:#64748b; border-bottom:1px solid #e2e8f0;">
-                    <th style="padding:8px;">Ref</th>
-                    <th style="padding:8px;">Maammila</th>
-                    <th style="padding:8px;">Hamma</th>
-                    <th style="padding:8px;">Comishina</th>
-                    <th style="padding:8px;">Maker</th>
-                    <th style="padding:8px;">Guyyaa</th>
-                </tr>
-            </thead>
-            <tbody>
-                {comm_html if comm_html else "<tr><td colspan='6' style='padding:16px; text-align:center; font-size:12px; color:#94a3b8;'>Comishiniin guyyaa kanaa hin jiru</td></tr>"}
+                {rows_html if rows_html else '<tr><td colspan="6" style="padding:16px; text-align:center; color:#64748b;">Transaction-ni socho'e hin jiru.</td></tr>'}
             </tbody>
         </table>
     </div>
@@ -2055,5 +2058,5 @@ def ceo_commission():
     return render_template_string(HTML_LAYOUT.replace("{% block content %}{% endblock %}", content), notifications=NOTIFICATIONS)
 
 if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host='0.0.0.0', port=port)
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)
