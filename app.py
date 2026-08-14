@@ -3,7 +3,14 @@ import datetime
 import random
 import time
 from io import BytesIO
-from PIL import Image
+
+# PIL safely import godhuu akka Render irratti error hin uumne
+try:
+    from PIL import Image
+    HAS_PIL = True
+except ImportError:
+    HAS_PIL = False
+
 from flask import Flask, request, redirect, url_for, session, render_template_string, send_from_directory, jsonify, send_file
 from werkzeug.utils import secure_filename
 import psycopg2
@@ -27,6 +34,10 @@ NOTIFICATIONS = []
 # --- IMAGE COMPRESSION FOR LOW DATA (3G/4G OPTIMIZATION) ---
 def compress_and_save_image(file_storage, target_path, max_width=600, quality=60):
     """Suuraa data xiqqoo akka fudhatuuf resizii fi compress godha"""
+    if not HAS_PIL:
+        file_storage.save(target_path)
+        return
+
     try:
         filename = file_storage.filename.lower()
         if filename.endswith('.pdf'):
@@ -430,7 +441,6 @@ def dashboard():
     """
     return render_template_string(HTML_LAYOUT.replace("{% block content %}{% endblock %}", content), notifications=NOTIFICATIONS)
 
-# --- 4. FEATURE: AI FINANCING AGENT (MUDARABA, MURABAHA & QARD AL-HASAN CALCULATOR & ADVISOR) ---
 @app.route('/ai_financing_agent', methods=['GET', 'POST'])
 def ai_financing_agent():
     if 'role' not in session:
@@ -1902,35 +1912,31 @@ def ceo_audit():
     cursor.close()
     conn.close()
 
-    net_cap, deposits, withdraws, cust_bal, total_comm = get_bank_capital()
-
     txns_html = "".join([f"""
     <tr style="border-bottom:1px solid #e2e8f0; font-size:11px;">
         <td style="padding:8px; font-weight:bold; color:#581c87;">{r['ft_reference']}</td>
         <td style="padding:8px;">{r['txn_type']}</td>
         <td style="padding:8px;">{r['customer_name']}</td>
         <td style="padding:8px;">{r['amount']:,.2f} Birr</td>
-        <td style="padding:8px; color:#dc2626; font-weight:bold;">{r['commission']:,.2f} Birr</td>
-        <td style="padding:8px;">{r['status']}</td>
+        <td style="padding:8px; color:#16a34a; font-weight:bold;">+{r['commission']:,.2f} Birr</td>
+        <td style="padding:8px;"><span class="badge badge-active">{r['status']}</span></td>
         <td style="padding:8px;">{r['created_by']}</td>
     </tr>
     """ for r in rows])
 
     content = f"""
-    <div style="background:#581c87; color:white; border-radius:16px; padding:20px; margin-bottom:20px;">
-        <h2 style="font-size:18px;">🌙 Executive Audit & Reports</h2>
+    <div style="background:#065f46; color:white; border-radius:16px; padding:20px; margin-bottom:20px;">
+        <h2 style="font-size:18px;">🌙 CEO Audit & Daily Reports</h2>
         <p style="font-size:11px; opacity:0.8;">Guyyaa Filatame: <b>{search_date}</b></p>
-        
-        <div style="margin-top:16px; padding-top:12px; border-top:1px solid rgba(255,255,255,0.2); display:grid; grid-template-columns:1fr 1fr; gap:10px; font-size:12px;">
-            <div>Kaabitaala Baankii: <b>{net_cap:,.2f} Birr</b></div>
-            <div>Comishinii Guyyaa: <b style="color:#fef08a;">{daily_commission:,.2f} Birr</b></div>
+        <div style="margin-top:10px; font-size:20px; font-weight:bold; color:#fbbf24;">
+            Comishinii Guyyaa: {daily_commission:,.2f} Birr
         </div>
     </div>
 
     <div class="box">
         <form method="GET" action="/ceo_audit" style="display:flex; gap:8px;">
             <input type="date" name="search_date" value="{search_date}" class="input-field" style="margin:0;">
-            <button type="submit" class="btn-submit" style="width:auto; padding:0 16px; background:#581c87;">Barbaadi</button>
+            <button type="submit" class="btn-submit" style="width:auto; padding:0 16px; background:#065f46;">Barbaadi</button>
         </form>
     </div>
 
@@ -1948,17 +1954,13 @@ def ceo_audit():
                 </tr>
             </thead>
             <tbody>
-                {txns_html if txns_html else "<tr><td colspan='7' style='padding:16px; text-align:center; font-size:12px; color:#94a3b8;'>Guyyaa kana transaction-ni hin raawwatamne</td></tr>"}
+                {txns_html if txns_html else "<tr><td colspan='7' style='padding:16px; text-align:center; font-size:12px; color:#94a3b8;'>Transaction-ni galmaa'e hin jiru</td></tr>"}
             </tbody>
         </table>
     </div>
     """
     return render_template_string(HTML_LAYOUT.replace("{% block content %}{% endblock %}", content), notifications=NOTIFICATIONS)
 
-@app.route('/uploads/<filename>')
-def uploaded_file(filename):
-    return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
-
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    app.run(host='0.0.0.0', port=port)
