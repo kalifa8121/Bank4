@@ -11,7 +11,7 @@ try:
 except ImportError:
     HAS_PIL = False
 
-from flask import Flask, request, redirect, url_for, session, render_template_string, send_from_directory, jsonify, send_file
+from flask import Flask, request, redirect, url_for, session, render_template_string, jsonify
 from werkzeug.utils import secure_filename
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -48,7 +48,6 @@ def compress_and_save_image(file_storage, target_path, max_width=600, quality=60
         if img.mode in ("RGBA", "P"):
             img = img.convert("RGB")
         
-        # Resize proportional
         if img.width > max_width:
             w_percent = (max_width / float(img.width))
             h_size = int((float(img.height) * float(w_percent)))
@@ -59,7 +58,7 @@ def compress_and_save_image(file_storage, target_path, max_width=600, quality=60
         print(f"Image Compression Error: {e}")
         file_storage.save(target_path)
 
-# --- POSTGRESQL DATABASE CONNECTION ---
+# --- POSTGRESQL DATABASE CONNECTION WITH RETRY FOR WEAK NETWORK ---
 def get_db_connection(max_retries=5, delay=1):
     for attempt in range(max_retries):
         try:
@@ -67,7 +66,7 @@ def get_db_connection(max_retries=5, delay=1):
             if db_url.startswith("postgres://"):
                 db_url = db_url.replace("postgres://", "postgresql://", 1)
                 
-            conn = psycopg2.connect(db_url, cursor_factory=RealDictCursor)
+            conn = psycopg2.connect(db_url, cursor_factory=RealDictCursor, connect_timeout=10)
             return conn
         except Exception as e:
             if attempt < max_retries - 1:
@@ -100,83 +99,86 @@ def add_notification(message):
 
 # --- DATABASE SETUP FOR POSTGRESQL ---
 def init_db():
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            username VARCHAR(100) PRIMARY KEY,
-            password VARCHAR(255) NOT NULL,
-            role VARCHAR(50) NOT NULL,
-            status VARCHAR(50) DEFAULT 'ACTIVE'
-        );
-    """)
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                username VARCHAR(100) PRIMARY KEY,
+                password VARCHAR(255) NOT NULL,
+                role VARCHAR(50) NOT NULL,
+                status VARCHAR(50) DEFAULT 'ACTIVE'
+            );
+        """)
 
-    cursor.execute("SELECT COUNT(*) FROM users;")
-    if cursor.fetchone()['count'] == 0:
-        default_users = [
-            ('ceo', 'ceo999', 'CEO', 'ACTIVE'),
-            ('manager1', 'manager123', 'MANAGER', 'ACTIVE'),
-            ('maker1', 'maker123', 'MAKER', 'ACTIVE'),
-            ('auditor1', 'auditor123', 'AUDITOR', 'ACTIVE')
-        ]
-        cursor.executemany("INSERT INTO users VALUES (%s, %s, %s, %s)", default_users)
+        cursor.execute("SELECT COUNT(*) FROM users;")
+        if cursor.fetchone()['count'] == 0:
+            default_users = [
+                ('ceo', 'ceo999', 'CEO', 'ACTIVE'),
+                ('manager1', 'manager123', 'MANAGER', 'ACTIVE'),
+                ('maker1', 'maker123', 'MAKER', 'ACTIVE'),
+                ('auditor1', 'auditor123', 'AUDITOR', 'ACTIVE')
+            ]
+            cursor.executemany("INSERT INTO users VALUES (%s, %s, %s, %s)", default_users)
 
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS customers (
-            customer_id VARCHAR(100) PRIMARY KEY,
-            full_name VARCHAR(255),
-            phone VARCHAR(50),
-            photo_path VARCHAR(255),
-            signature_path VARCHAR(255),
-            national_id_path VARCHAR(255) DEFAULT '',
-            balance DOUBLE PRECISION DEFAULT 0.0,
-            status VARCHAR(50) DEFAULT 'PENDING_APPROVAL',
-            freeze_status VARCHAR(50) DEFAULT 'UNFROZEN',
-            freeze_reason VARCHAR(255) DEFAULT '',
-            created_at VARCHAR(100)
-        );
-    """)
-    
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS transactions (
-            txn_id VARCHAR(100) PRIMARY KEY,
-            txn_type VARCHAR(50),
-            customer_id VARCHAR(100),
-            customer_name VARCHAR(255),
-            target_account VARCHAR(100),
-            amount DOUBLE PRECISION,
-            commission DOUBLE PRECISION DEFAULT 0.0,
-            bank_name VARCHAR(100),
-            ft_reference VARCHAR(100),
-            status VARCHAR(50) DEFAULT 'PENDING_MANAGER',
-            created_by VARCHAR(100),
-            timestamp VARCHAR(100),
-            audited_status VARCHAR(50) DEFAULT 'OPEN'
-        );
-    """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS customers (
+                customer_id VARCHAR(100) PRIMARY KEY,
+                full_name VARCHAR(255),
+                phone VARCHAR(50),
+                photo_path VARCHAR(255),
+                signature_path VARCHAR(255),
+                national_id_path VARCHAR(255) DEFAULT '',
+                balance DOUBLE PRECISION DEFAULT 0.0,
+                status VARCHAR(50) DEFAULT 'PENDING_APPROVAL',
+                freeze_status VARCHAR(50) DEFAULT 'UNFROZEN',
+                freeze_reason VARCHAR(255) DEFAULT '',
+                created_at VARCHAR(100)
+            );
+        """)
+        
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS transactions (
+                txn_id VARCHAR(100) PRIMARY KEY,
+                txn_type VARCHAR(50),
+                customer_id VARCHAR(100),
+                customer_name VARCHAR(255),
+                target_account VARCHAR(100),
+                amount DOUBLE PRECISION,
+                commission DOUBLE PRECISION DEFAULT 0.0,
+                bank_name VARCHAR(100),
+                ft_reference VARCHAR(100),
+                status VARCHAR(50) DEFAULT 'PENDING_MANAGER',
+                created_by VARCHAR(100),
+                timestamp VARCHAR(100),
+                audited_status VARCHAR(50) DEFAULT 'OPEN'
+            );
+        """)
 
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS reversals (
-            reversal_id VARCHAR(100) PRIMARY KEY,
-            txn_id VARCHAR(100) NOT NULL,
-            reason TEXT NOT NULL,
-            requested_by VARCHAR(100) NOT NULL,
-            manager_approved INT DEFAULT 0,
-            ceo_approved INT DEFAULT 0,
-            status VARCHAR(50) DEFAULT 'PENDING_APPROVAL',
-            timestamp VARCHAR(100)
-        );
-    """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS reversals (
+                reversal_id VARCHAR(100) PRIMARY KEY,
+                txn_id VARCHAR(100) NOT NULL,
+                reason TEXT NOT NULL,
+                requested_by VARCHAR(100) NOT NULL,
+                manager_approved INT DEFAULT 0,
+                ceo_approved INT DEFAULT 0,
+                status VARCHAR(50) DEFAULT 'PENDING_APPROVAL',
+                timestamp VARCHAR(100)
+            );
+        """)
 
-    conn.commit()
-    cursor.close()
-    conn.close()
+        conn.commit()
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        print(f"Database Init Exception: {e}")
 
 try:
     init_db()
 except Exception as e:
-    print(f"Database Init Exception (Normal on initial build setup): {e}")
+    print(f"Database Init Exception: {e}")
 
 def get_bank_capital():
     conn = get_db_connection()
@@ -223,7 +225,7 @@ HTML_LAYOUT = """
         .card-net { background: linear-gradient(135deg, #064e3b, #047857); color: white; border-radius: 16px; padding: 20px; box-shadow: 0 10px 15px -3px rgba(6,78,59,0.3); margin-bottom: 20px; }
         .net-title { font-size: 12px; opacity: 0.9; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
         .net-amount { font-size: 32px; font-weight: 800; color: #fbbf24; }
-        .net-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 16px; pt: 12px; border-top: 1px solid rgba(255,255,255,0.2); font-size: 12px; }
+        .net-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 16px; padding-top: 12px; border-top: 1px solid rgba(255,255,255,0.2); font-size: 12px; }
         .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
         .btn-card { background: white; padding: 16px; border-radius: 12px; border: 1px solid #e2e8f0; display: flex; flex-direction: column; align-items: center; text-decoration: none; color: #334155; font-weight: bold; font-size: 13px; text-align: center; box-shadow: 0 1px 3px rgba(0,0,0,0.05); transition: 0.2s; }
         .btn-card:active { transform: scale(0.98); }
@@ -1404,7 +1406,6 @@ def maker_receipts():
     """
     return render_template_string(HTML_LAYOUT.replace("{% block content %}{% endblock %}", content), notifications=NOTIFICATIONS)
 
-# --- GALMEE MAAMMILA (WITH IMAGE OPTIMIZATION FOR 3G/4G) ---
 @app.route('/register', methods=['GET', 'POST'])
 def register():
     if 'role' not in session or session['role'] != 'MAKER':
@@ -1429,7 +1430,6 @@ def register():
                 nat_id_filename = f"nat_{timestamp_str}_" + secure_filename(nat_id_file.filename)
                 compress_and_save_image(nat_id_file, os.path.join(app.config['UPLOAD_FOLDER'], nat_id_filename))
 
-            # Image Optimization for low bandwidth
             compress_and_save_image(photo_file, os.path.join(app.config['UPLOAD_FOLDER'], photo_filename))
             compress_and_save_image(sig_file, os.path.join(app.config['UPLOAD_FOLDER'], sig_filename))
 
@@ -1870,32 +1870,33 @@ def auditor_close():
 
     content = f"""
     <div class="box">
-        <h2 style="font-size: 16px; margin-bottom: 4px; color:#c2410c;">🔒 Cufiinsa Herrega Guyyaa (Auditor Close)</h2>
-        <p style="font-size: 11px; color:#64748b; margin-bottom: 14px;">Guyyaa Har'aa: <b>{today_str}</b></p>
+        <h2 style="font-size: 16px; margin-bottom: 4px; color:#c2410c;">🔒 Cufiinsa Herrega Galgalaa (Auditor Close)</h2>
+        <p style="font-size: 11px; color:#64748b; margin-bottom: 12px;">Guyyaa Har'aa: <b>{today_str}</b></p>
         
         {f"<p style='background:#dcfce7; color:#166534; padding:10px; border-radius:6px; font-size:12px; font-weight:bold; margin-bottom:12px;'>{msg}</p>" if msg else ""}
 
-        <h3 style="font-size:13px; margin-bottom:8px;">📊 Axaawwama Hojii Maker-ootaa Har'aa</h3>
-        <table style="width:100%; border-collapse:collapse; text-align:left; margin-bottom:16px;">
+        <form method="POST">
+            <button type="submit" class="btn-submit" style="background:#dc2626;" onclick="return confirm('Cufiinsa Herregaa Mirkaneessitaa?')">🔒 Herrega Guyyaa Har'aa Cufi (Close Day)</button>
+        </form>
+    </div>
+
+    <h3 style="font-size:13px; margin-bottom:8px; color:#334155;">📊 Cuunfaa Hojii Maker-oota Guyyaa Har'aa</h3>
+    <div class="box" style="padding:0; overflow-x:auto;">
+        <table style="width:100%; border-collapse:collapse; text-align:left;">
             <thead>
                 <tr style="background:#f8fafc; font-size:11px; color:#64748b; border-bottom:1px solid #e2e8f0;">
                     <th style="padding:8px;">Maker</th>
-                    <th style="padding:8px;">Total Deposit</th>
-                    <th style="padding:8px;">Total Withdraw/FT</th>
+                    <th style="padding:8px;">Deposit Total</th>
+                    <th style="padding:8px;">Withdraw Total</th>
                 </tr>
             </thead>
             <tbody>
-                {summary_html if summary_html else "<tr><td colspan='3' style='padding:12px; text-align:center; color:#94a3b8;'>Hojiin har'a raawwatame hin jiru</td></tr>"}
+                {summary_html if summary_html else "<tr><td colspan='3' style='padding:16px; text-align:center; font-size:12px; color:#94a3b8;'>Hojiin galmaa'e hin jiru</td></tr>"}
             </tbody>
         </table>
-
-        <form method="POST">
-            <button type="submit" class="btn-submit" style="background:#c2410c;">🔒 Herrega Guyyaa Har'aa Cufi (Close Day)</button>
-        </form>
     </div>
     """
     return render_template_string(HTML_LAYOUT.replace("{% block content %}{% endblock %}", content), notifications=NOTIFICATIONS)
 
 if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    app.run(host='0.0.0.0', port=5000, debug=True)
