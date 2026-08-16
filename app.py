@@ -1,23 +1,25 @@
 import os
 import datetime
 import random
-import sys
 import time
 from io import BytesIO
 
+# PostgreSQL integration for Neon.tech
+import psycopg2
+from psycopg2.extras import RealDictCursor
+
+# PIL (Pillow) exception handling for deployment stability
 try:
     from PIL import Image
     HAS_PIL = True
 except ImportError:
     HAS_PIL = False
 
-from flask import Flask, request, redirect, url_for, session, render_template_string, send_from_directory, jsonify, send_file
+from flask import Flask, request, redirect, url_for, session, render_template_string, send_from_directory, jsonify
 from werkzeug.utils import secure_filename
-import psycopg2
-from psycopg2.extras import RealDictCursor
 
 app = Flask(__name__)
-app.secret_key = "imana_free_interest_microfinance_secret_key"
+app.secret_key = os.environ.get("SECRET_KEY", "imana_free_interest_microfinance_secret_key")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 UPLOAD_FOLDER = os.path.join(BASE_DIR, 'uploads')
@@ -28,9 +30,16 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 NOTIFICATIONS = []
 
-# --- NETWORK OPTIMIZATION FOR 2G/3G/4G ---
-def compress_and_save_image(file_storage, target_filename, max_size=(500, 500), quality=50):
-    """Network saffisiisuuf suuraa haalaan compress godha"""
+# --- DATABASE CONNECTION FOR NEON.TECH (POSTGRESQL) ---
+DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://user:password@ep-cool-cloud-123456.us-east-2.aws.neon.tech/neondb?sslmode=require")
+
+def get_db_connection():
+    conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+    return conn
+
+# --- LIGHTWEIGHT IMAGE COMPRESSION (FOR 2G/3G/4G SPEED) ---
+def compress_and_save_image(file_storage, target_filename, max_size=(400, 400), quality=45):
+    """Compresses uploaded images heavily to ensure instant speed over 2G/3G/4G networks."""
     filepath = os.path.join(app.config['UPLOAD_FOLDER'], target_filename)
     filename = file_storage.filename.lower()
     
@@ -50,13 +59,6 @@ def compress_and_save_image(file_storage, target_filename, max_size=(500, 500), 
         print(f"Image compression error: {e}")
         file_storage.save(filepath)
         return target_filename
-
-# --- POSTGRESQL (NEON.COM) CONNECTION ---
-DATABASE_URL = os.environ.get('DATABASE_URL', 'postgresql://user:password@neon-host/dbname')
-
-def get_db_connection():
-    conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
-    return conn
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
@@ -81,7 +83,7 @@ def add_notification(message):
     if len(NOTIFICATIONS) > 20:
         NOTIFICATIONS.pop()
 
-# --- DATABASE SETUP (POSTGRESQL) ---
+# --- POSTGRESQL TABLES INIT ---
 def init_db():
     try:
         conn = get_db_connection()
@@ -94,7 +96,20 @@ def init_db():
                 role VARCHAR(30) NOT NULL,
                 status VARCHAR(20) DEFAULT 'ACTIVE'
             );
+        """)
 
+        cursor.execute("SELECT COUNT(*) FROM users;")
+        if cursor.fetchone()['count'] == 0:
+            default_users = [
+                ('ceo', 'ceo999', 'CEO', 'ACTIVE'),
+                ('manager1', 'manager123', 'MANAGER', 'ACTIVE'),
+                ('maker1', 'maker123', 'MAKER', 'ACTIVE'),
+                ('auditor1', 'auditor123', 'AUDITOR', 'ACTIVE'),
+                ('officer1', 'officer123', 'LOAN_OFFICER', 'ACTIVE')
+            ]
+            cursor.executemany("INSERT INTO users VALUES (%s, %s, %s, %s);", default_users)
+
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS customers (
                 customer_id VARCHAR(50) PRIMARY KEY,
                 full_name VARCHAR(100),
@@ -110,7 +125,9 @@ def init_db():
                 freeze_reason TEXT DEFAULT '',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
+        """)
 
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS transactions (
                 txn_id VARCHAR(50) PRIMARY KEY,
                 txn_type VARCHAR(30),
@@ -126,7 +143,9 @@ def init_db():
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 audited_status VARCHAR(20) DEFAULT 'OPEN'
             );
+        """)
 
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS reversals (
                 reversal_id VARCHAR(50) PRIMARY KEY,
                 txn_id VARCHAR(50) NOT NULL,
@@ -137,7 +156,9 @@ def init_db():
                 status VARCHAR(30) DEFAULT 'PENDING_APPROVAL',
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
+        """)
 
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS islamic_financing (
                 loan_id VARCHAR(50) PRIMARY KEY,
                 customer_id VARCHAR(50) NOT NULL,
@@ -157,57 +178,42 @@ def init_db():
             );
         """)
 
-        cursor.execute("SELECT COUNT(*) FROM users")
-        if cursor.fetchone()['count'] == 0:
-            default_users = [
-                ('ceo', 'ceo999', 'CEO', 'ACTIVE'),
-                ('manager1', 'manager123', 'MANAGER', 'ACTIVE'),
-                ('maker1', 'maker123', 'MAKER', 'ACTIVE'),
-                ('auditor1', 'auditor123', 'AUDITOR', 'ACTIVE'),
-                ('officer1', 'officer123', 'LOAN_OFFICER', 'ACTIVE')
-            ]
-            cursor.executemany("INSERT INTO users VALUES (%s, %s, %s, %s)", default_users)
-
         conn.commit()
+        cursor.close()
         conn.close()
     except Exception as e:
-        print(f"DB Init Exception: {e}")
+        print(f"PostgreSQL Init Error: {e}")
 
-# Call init DB
 init_db()
 
 def get_bank_capital():
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT SUM(amount) FROM transactions WHERE status='APPROVED' AND txn_type='DEPOSIT'")
-    res = cursor.fetchone()
-    total_deposit = float(res['sum'] or 0.0)
+    cursor.execute("SELECT SUM(amount) FROM transactions WHERE status='APPROVED' AND txn_type='DEPOSIT';")
+    total_deposit = float(cursor.fetchone()['sum'] or 0.0)
     
-    cursor.execute("SELECT SUM(amount) FROM transactions WHERE status='APPROVED' AND txn_type IN ('WITHDRAWAL', 'T24_TRANSFER')")
-    res = cursor.fetchone()
-    total_withdraw = float(res['sum'] or 0.0)
+    cursor.execute("SELECT SUM(amount) FROM transactions WHERE status='APPROVED' AND txn_type IN ('WITHDRAWAL', 'T24_TRANSFER');")
+    total_withdraw = float(cursor.fetchone()['sum'] or 0.0)
     
-    cursor.execute("SELECT SUM(balance) FROM customers WHERE status='ACTIVE'")
-    res = cursor.fetchone()
-    total_cust_balance = float(res['sum'] or 0.0)
+    cursor.execute("SELECT SUM(balance) FROM customers WHERE status='ACTIVE';")
+    total_cust_balance = float(cursor.fetchone()['sum'] or 0.0)
 
-    cursor.execute("SELECT SUM(commission) FROM transactions WHERE status='APPROVED'")
-    res = cursor.fetchone()
-    total_commission = float(res['sum'] or 0.0)
+    cursor.execute("SELECT SUM(commission) FROM transactions WHERE status='APPROVED';")
+    total_commission = float(cursor.fetchone()['sum'] or 0.0)
 
-    cursor.execute("SELECT SUM(balance) FROM customers WHERE status='ACTIVE' AND account_type='MUDARABA'")
-    res = cursor.fetchone()
-    total_mudaraba_deposits = float(res['sum'] or 0.0)
+    cursor.execute("SELECT SUM(balance) FROM customers WHERE status='ACTIVE' AND account_type='MUDARABA';")
+    total_mudaraba_deposits = float(cursor.fetchone()['sum'] or 0.0)
 
     mudaraba_gross_profit = total_mudaraba_deposits * 0.10
     mudaraba_ceo_share = mudaraba_gross_profit * 0.50
     mudaraba_customer_share = mudaraba_gross_profit * 0.50
     
     net_capital = total_deposit - total_withdraw + total_commission
+    cursor.close()
     conn.close()
     return max(0.0, net_capital), total_deposit, total_withdraw, total_cust_balance, total_commission, total_mudaraba_deposits, mudaraba_gross_profit, mudaraba_ceo_share, mudaraba_customer_share
 
-# --- VERIFY RECIPIENT ACCOUNT ---
+# --- RECIPIENT VERIFICATION API ---
 @app.route('/api/verify_account/<cust_id>')
 def verify_account(cust_id):
     if 'role' not in session:
@@ -215,8 +221,9 @@ def verify_account(cust_id):
     
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT full_name, freeze_status, status FROM customers WHERE customer_id = %s", (cust_id.strip(),))
+    cursor.execute("SELECT full_name, freeze_status, status FROM customers WHERE customer_id = %s;", (cust_id.strip(),))
     row = cursor.fetchone()
+    cursor.close()
     conn.close()
     
     if row:
@@ -256,8 +263,6 @@ HTML_LAYOUT = """
         .btn-card:active { transform: scale(0.98); }
         .btn-card span.icon { font-size: 24px; margin-bottom: 8px; }
         .btn-card-ceo { background: #faf5ff; border-color: #e9d5ff; color: #581c87; }
-        .btn-card-auditor { background: #fff7ed; border-color: #ffedd5; color: #c2410c; }
-        .btn-card-loan { background: #f0fdf4; border-color: #bbf7d0; color: #15803d; }
         .bottom-nav { position: fixed; bottom: 0; left: 0; right: 0; background: white; border-top: 1px solid #e2e8f0; display: flex; justify-content: space-around; padding: 10px 0; z-index: 50; }
         .bottom-nav a { text-align: center; color: #64748b; text-decoration: none; font-size: 11px; flex: 1; font-weight: 500; }
         .bottom-nav a span.icon { display: block; font-size: 18px; margin-bottom: 2px; }
@@ -266,10 +271,13 @@ HTML_LAYOUT = """
         .form-group label { display: block; font-size: 12px; font-weight: bold; color: #475569; margin-bottom: 4px; }
         .input-field { width: 100%; padding: 10px; border: 1px solid #cbd5e1; border-radius: 8px; font-size: 14px; outline: none; }
         .btn-submit { width: 100%; background: #047857; color: white; border: none; padding: 12px; border-radius: 8px; font-weight: bold; font-size: 14px; cursor: pointer; }
+        .badge { padding: 3px 8px; border-radius: 4px; font-size: 10px; font-weight: bold; display: inline-block; }
+        .badge-pending { background: #fef3c7; color: #92400e; }
+        .badge-active { background: #dcfce7; color: #166534; }
+        .badge-danger { background: #fee2e2; color: #991b1b; }
+        .item-card { background: white; border-radius: 12px; padding: 14px; margin-bottom: 12px; border: 1px solid #e2e8f0; }
         .btn-action { padding: 6px 12px; border-radius: 6px; color: white; text-decoration: none; font-size: 12px; font-weight: bold; display: inline-block; border:none; cursor:pointer; }
         .btn-blue { background: #2563eb; }
-        .btn-green { background: #16a34a; }
-        .btn-red { background: #dc2626; }
         .btn-purple { background: #7c3aed; }
     </style>
 </head>
@@ -313,6 +321,10 @@ HTML_LAYOUT = """
 </html>
 """
 
+@app.route('/uploads/<filename>')
+def uploaded_file(filename):
+    return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
+
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     error = None
@@ -322,8 +334,9 @@ def login():
 
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT username, role, status FROM users WHERE username = %s AND password = %s", (username, password))
+        cursor.execute("SELECT username, role, status FROM users WHERE username = %s AND password = %s;", (username, password))
         user = cursor.fetchone()
+        cursor.close()
         conn.close()
 
         if user:
@@ -346,11 +359,11 @@ def login():
         <form method="POST">
             <div class="form-group" style="text-align:left;">
                 <label>Username</label>
-                <input type="text" name="username" placeholder="Fkn: ceo, maker1" class="input-field" required>
+                <input type="text" name="username" placeholder="Fkn: ceo, manager1, maker1" class="input-field" required>
             </div>
             <div class="form-group" style="text-align:left;">
                 <label>Password</label>
-                <input type="password" name="password" placeholder="Password" class="input-field" required>
+                <input type="password" id="login_password" name="password" placeholder="Password" class="input-field" required>
             </div>
             <button type="submit" class="btn-submit">Seeni (Login)</button>
         </form>
@@ -374,8 +387,9 @@ def dashboard():
     maker_btns = ""
     if role == 'MAKER':
         maker_btns = """
-        <a href="/register" class="btn-card"><span class="icon">👤</span><span>Galmee Maammilaa (Saffisaa)</span></a>
+        <a href="/register" class="btn-card"><span class="icon">👤</span><span>Galmee Maammilaa (Fast)</span></a>
         <a href="/transaction" class="btn-card"><span class="icon">💸</span><span>Deposit / Transfer / Withdraw</span></a>
+        <a href="/maker_receipts" class="btn-card"><span class="icon">🧾</span><span>Nagahee Maxxansi</span></a>
         """
 
     content = f"""
@@ -395,7 +409,7 @@ def dashboard():
     """
     return render_template_string(HTML_LAYOUT.replace("{% block content %}{% endblock %}", content), notifications=NOTIFICATIONS)
 
-# --- TRANSACTION WITH DOUBLE AMOUNT ENTRY & RECIPIENT VERIFICATION ---
+# --- MAKER TRANSACTION ROUTE (DOUBLE ENTRY & RECIPIENT VERIFY) ---
 @app.route('/transaction', methods=['GET', 'POST'])
 def transaction():
     if 'role' not in session or session['role'] != 'MAKER':
@@ -403,7 +417,7 @@ def transaction():
 
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT customer_id, full_name, balance FROM customers WHERE status='ACTIVE'")
+    cursor.execute("SELECT customer_id, full_name, balance, freeze_status FROM customers WHERE status='ACTIVE';")
     customers = cursor.fetchall()
 
     msg = None
@@ -417,11 +431,11 @@ def transaction():
         confirm_amount = float(request.form.get('confirm_amount', 0.0))
         bank_name = request.form.get('bank_name', 'Imana Microfinance Core')
 
-        cursor.execute("SELECT full_name, balance, freeze_status FROM customers WHERE customer_id = %s", (cust_id,))
+        cursor.execute("SELECT full_name, balance, freeze_status FROM customers WHERE customer_id = %s;", (cust_id,))
         cust = cursor.fetchone()
 
         if amount != confirm_amount:
-            msg = "❌ Lakkoofsi maallaqaa bakka lamatti galchitan wal-hin simne! Irra deebi'aa galchaa."
+            msg = "❌ Lakkoofsi maallaqaa bakka lamatti galchitan wal-hin simne! Dogoggora malee irra deebi'a galchaa."
             msg_type = "red"
         elif not cust:
             msg = "❌ Maammilli hin argamne!"
@@ -437,26 +451,26 @@ def transaction():
             total_req = amount + commission
 
             if txn_type in ['WITHDRAWAL', 'T24_TRANSFER'] and float(cust['balance']) < total_req:
-                msg = f"❌ Balansii gahaa miti! Balansii jiru: {cust['balance']:,.2f} Birr"
+                msg = f"❌ Balansii gahaa miti! Balansii jiru: {float(cust['balance']):,.2f} Birr"
                 msg_type = "red"
             else:
                 timestamp_str = int(datetime.datetime.now().timestamp())
                 ft_ref = f"FT{datetime.datetime.now().strftime('%y%j')}{random.randint(10000, 99999)}"
-                now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 txn_id = f"TXN-{timestamp_str}"
 
                 cursor.execute("""
-                    INSERT INTO transactions (txn_id, txn_type, customer_id, customer_name, target_account, amount, commission, bank_name, ft_reference, status, created_by, timestamp)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'PENDING_MANAGER', %s, %s)
-                """, (txn_id, txn_type, cust_id, cust['full_name'], target_acc, amount, commission, bank_name, ft_ref, session['username'], now))
+                    INSERT INTO transactions (txn_id, txn_type, customer_id, customer_name, target_account, amount, commission, bank_name, ft_reference, status, created_by)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'PENDING_MANAGER', %s);
+                """, (txn_id, txn_type, cust_id, cust['full_name'], target_acc, amount, commission, bank_name, ft_ref, session['username']))
 
                 conn.commit()
                 msg = f"✅ Transaction ({txn_type}) {amount:,.2f} Birr galmaa'eera (Ref: {ft_ref})."
                 add_notification(f"Maker transaction haaraa uumeera: {ft_ref}")
 
+    cursor.close()
     conn.close()
 
-    cust_options = "".join([f'<option value="{c["customer_id"]}">{c["full_name"]} - {c["customer_id"]} (Bal: {c["balance"]:,.2f} Birr)</option>' for c in customers])
+    cust_options = "".join([f'<option value="{c["customer_id"]}">{c["full_name"]} - {c["customer_id"]} (Bal: {float(c["balance"]):,.2f} Birr)</option>' for c in customers])
 
     content = f"""
     <div class="box">
@@ -466,7 +480,7 @@ def transaction():
 
         <form method="POST" onsubmit="return validateAmounts()">
             <div class="form-group">
-                <label>Gosa Kaffaltii</label>
+                <label>Gosa Kaffaltii (Transaction Type)</label>
                 <select name="txn_type" id="txn_type" class="input-field" onchange="toggleTargetAcc()">
                     <option value="DEPOSIT">📥 Deposit (Galii Maallaqaa)</option>
                     <option value="WITHDRAWAL">📤 Withdrawal (Baasii Maallaqaa)</option>
@@ -480,7 +494,7 @@ def transaction():
                 </select>
             </div>
             
-            <!-- RECIPIENT VERIFICATION UI -->
+            <!-- RECIPIENT VERIFICATION -->
             <div class="form-group" id="target_acc_group" style="display:none; background:#f0fdf4; padding:10px; border-radius:8px; border:1px solid #bbf7d0;">
                 <label style="color:#166534;">Target Account ID (Nama Ergamuuf)</label>
                 <div style="display:flex; gap:6px;">
@@ -490,18 +504,22 @@ def transaction():
                 <p id="verify_result" style="font-size:11px; font-weight:bold; margin-top:4px; color:#047857;"></p>
             </div>
 
-            <!-- DOUBLE AMOUNT ENTRY -->
+            <!-- DOUBLE ENTRY AMOUNT TO PREVENT ERRORS -->
             <div class="form-group">
-                <label>Hamma Maallaqaa (Amount in Birr)</label>
+                <label>1. Hamma Maallaqaa (Amount in Birr)</label>
                 <input type="number" step="0.01" id="amount" name="amount" placeholder="0.00" required class="input-field">
             </div>
             <div class="form-group">
-                <label>Irra Deebi'i Galchi (Confirm Amount)</label>
+                <label>2. Irra Deebi'i Galchi (Confirm Amount)</label>
                 <input type="number" step="0.01" id="confirm_amount" name="confirm_amount" placeholder="0.00" required class="input-field" oninput="checkMatch()">
-                <p id="amount_err" style="font-size:10px; color:red; display:none; margin-top:2px;">⚠️ Lakkoofsi galchitan wal-hin simne!</p>
+                <p id="amount_err" style="font-size:11px; color:red; display:none; margin-top:2px; font-weight:bold;">⚠️ Lakkoofsi galchitan wal-hin simne!</p>
             </div>
 
-            <button type="submit" class="btn-submit">⚡ Transaction Galmeessi</button>
+            <div class="form-group">
+                <label>Moggaasa Baankii / Note</label>
+                <input type="text" name="bank_name" value="Imana Microfinance Core" class="input-field">
+            </div>
+            <button type="submit" class="btn-submit">⚡ Transaction Galmeessi (Send to Manager)</button>
         </form>
     </div>
 
@@ -544,7 +562,11 @@ def transaction():
         var a1 = document.getElementById('amount').value;
         var a2 = document.getElementById('confirm_amount').value;
         var err = document.getElementById('amount_err');
-        err.style.display = (a1 && a2 && a1 !== a2) ? 'block' : 'none';
+        if(a1 && a2 && a1 !== a2) {{
+            err.style.display = 'block';
+        }} else {{
+            err.style.display = 'none';
+        }}
     }}
 
     function validateAmounts() {{
@@ -560,11 +582,11 @@ def transaction():
     """
     return render_template_string(HTML_LAYOUT.replace("{% block content %}{% endblock %}", content), notifications=NOTIFICATIONS)
 
-# --- FAST CUSTOMER REGISTRATION ROUTE ---
+# --- FAST CUSTOMER REGISTRATION (NETWORK OPTIMIZED FOR 2G/3G/4G) ---
 @app.route('/register', methods=['GET', 'POST'])
 def register():
     if 'role' not in session or session['role'] != 'MAKER':
-        return "🚫 Shoora MAKER qofa", 403
+        return "🚫 Shoora MAKER qofatu maammila galmeessuu danda'a", 403
 
     msg = None
     if request.method == 'POST':
@@ -580,7 +602,7 @@ def register():
         if photo_file and sig_file and allowed_file(photo_file.filename) and allowed_file(sig_file.filename):
             timestamp_str = int(datetime.datetime.now().timestamp())
             
-            # FAST IMAGE COMPRESSION FOR 2G/3G/4G
+            # Fast Compression for 2G/3G/4G network speeds
             photo_filename = compress_and_save_image(photo_file, f"face_{timestamp_str}_" + secure_filename(photo_file.filename))
             sig_filename = compress_and_save_image(sig_file, f"sig_{timestamp_str}_" + secure_filename(sig_file.filename))
             
@@ -592,25 +614,33 @@ def register():
             conn = get_db_connection()
             cursor = conn.cursor()
             
-            cursor.execute("SELECT MAX(CAST(customer_id AS BIGINT)) FROM customers WHERE customer_id >= '100099008800'")
-            res = cursor.fetchone()
-            max_id = res['max'] if res and res['max'] else None
+            cursor.execute("SELECT MAX(CAST(customer_id AS BIGINT)) FROM customers WHERE customer_id >= '100099008800';")
+            row = cursor.fetchone()
+            max_id = row['max'] if row else None
 
             cust_id = str(START_ID) if max_id is None or max_id < START_ID else str(max_id + 1)
-            now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
             cursor.execute("""
-                INSERT INTO customers (customer_id, full_name, phone, gender, account_type, photo_path, signature_path, national_id_path, balance, status, created_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'PENDING_APPROVAL', %s)
-            """, (cust_id, full_name, phone, gender, account_type, photo_filename, sig_filename, nat_id_filename, initial_balance, now))
+                INSERT INTO customers (customer_id, full_name, phone, gender, account_type, photo_path, signature_path, national_id_path, balance, status)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'PENDING_APPROVAL');
+            """, (cust_id, full_name, phone, gender, account_type, photo_filename, sig_filename, nat_id_filename, initial_balance))
+
+            if initial_balance > 0:
+                ft_ref = f"FT{datetime.datetime.now().strftime('%y%j')}{random.randint(10000, 99999)}"
+                cursor.execute("""
+                    INSERT INTO transactions (txn_id, txn_type, customer_id, customer_name, amount, bank_name, ft_reference, status, created_by)
+                    VALUES (%s, 'DEPOSIT', %s, %s, %s, 'Imana Microfinance Core', %s, 'APPROVED', %s);
+                """, (f"TXN-INIT-{timestamp_str}", cust_id, full_name, initial_balance, ft_ref, session['username']))
 
             conn.commit()
+            cursor.close()
             conn.close()
             msg = f"⚡ Maammilli {full_name} dafee galmaa'eera! (T24 Acc: {cust_id})."
+            add_notification(f"Galmeen maammila haaraa ({full_name}) raawwatameera.")
 
     content = f"""
     <div class="box">
-        <h2 style="font-size: 16px; margin-bottom: 12px; color:#065f46;">⚡ Galmee Maammilaa Saffisaa (Maker T24)</h2>
+        <h2 style="font-size: 16px; margin-bottom: 12px; color:#065f46;">⚡ Galmee Maammilaa Saffisaa (Network 2G/3G/4G Optimized)</h2>
         {f"<p style='background:#dcfce7; color:#166534; padding:10px; border-radius:6px; font-size:12px; font-weight:bold; margin-bottom:12px;'>{msg}</p>" if msg else ""}
         <form method="POST" enctype="multipart/form-data">
             <div class="form-group">
@@ -618,17 +648,17 @@ def register():
                 <input type="text" name="full_name" required class="input-field">
             </div>
             <div class="form-group">
-                <label>Saala</label>
+                <label>Saala (Sex / Gender)</label>
                 <select name="gender" class="input-field" required>
-                    <option value="Dhiira">Dhiira</option>
-                    <option value="Dubartii">Dubartii</option>
+                    <option value="Dhiira">Dhiira (Male)</option>
+                    <option value="Dubartii">Dubartii (Female)</option>
                 </select>
             </div>
             <div class="form-group">
-                <label>Gosa Akkaawuntii</label>
+                <label>Gosa Akkaawuntii (Account Scheme)</label>
                 <select name="account_type" class="input-field" required>
-                    <option value="WADIA">Wadia Savings</option>
-                    <option value="MUDARABA">Mudaraba Investment</option>
+                    <option value="WADIA">A, Wadia Savings (Yeroo Gabaabduu / Faaydaa Malee)</option>
+                    <option value="MUDARABA">B, Mudaraba Investment (50%, 50% Profit Share)</option>
                 </select>
             </div>
             <div class="form-group">
@@ -636,22 +666,22 @@ def register():
                 <input type="text" name="phone" required class="input-field">
             </div>
             <div class="form-group">
-                <label>Balansii Jalqabaa</label>
+                <label>Balansii Jalqabaa (Initial Balance in Birr)</label>
                 <input type="number" step="0.01" min="0" name="initial_balance" value="0.00" required class="input-field">
             </div>
             <div class="form-group">
-                <label>📸 Suuraa Fuulaa</label>
+                <label>📸 Suuraa Fuula Maammilaa</label>
                 <input type="file" name="photo" accept="image/*" required class="input-field">
             </div>
             <div class="form-group">
-                <label>✍️ Mallattoo</label>
+                <label>✍️ Mallattoo Galmee (Signature)</label>
                 <input type="file" name="signature" accept="image/*" required class="input-field">
             </div>
             <div class="form-group">
-                <label>🆔 National ID / Fayda</label>
+                <label>🆔 Waraqaa Eenyummaa (National ID / Fayda / Passport)</label>
                 <input type="file" name="national_id" accept="image/*,.pdf" class="input-field">
             </div>
-            <button type="submit" class="btn-submit">⚡ Dafeen Galmeessi</button>
+            <button type="submit" class="btn-submit">⚡ Dafeen Galmeessi (Create T24 Account)</button>
         </form>
     </div>
     """
