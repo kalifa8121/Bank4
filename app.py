@@ -7,7 +7,7 @@ import sys
 import time
 from io import BytesIO
 
-# PIL (Pillow) exception handling for Render deployment stability
+# PIL (Pillow) exception handling for deployment stability
 try:
     from PIL import Image
     HAS_PIL = True
@@ -22,18 +22,21 @@ app.secret_key = "imana_free_interest_microfinance_secret_key"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 UPLOAD_FOLDER = os.path.join(BASE_DIR, 'uploads')
+BACKUP_FOLDER = os.path.join(BASE_DIR, 'backups')
 DB_PATH = os.path.join(BASE_DIR, "web_banking.db")
 
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'webp', 'pdf'}
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+app.config['BACKUP_FOLDER'] = BACKUP_FOLDER
 
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+os.makedirs(BACKUP_FOLDER, exist_ok=True)
 
 NOTIFICATIONS = []
 
 # --- IMAGE COMPRESSION & NETWORK OPTIMIZATION ---
 def compress_and_save_image(file_storage, target_filename, max_size=(600, 600), quality=60):
-    """Compresses uploaded images to low file size for slow network speed & Render fast rendering"""
+    """Compresses uploaded images to low file size"""
     filepath = os.path.join(app.config['UPLOAD_FOLDER'], target_filename)
     filename = file_storage.filename.lower()
     
@@ -228,22 +231,26 @@ def get_bank_capital():
     conn.close()
     return max(0.0, net_capital), total_deposit, total_withdraw, total_cust_balance, total_commission, total_mudaraba_deposits, mudaraba_gross_profit, mudaraba_ceo_share, mudaraba_customer_share
 
-# --- API FOR TARGET ACCOUNT VERIFICATION ---
-@app.route('/verify_account/<acc_id>')
-def verify_account(acc_id):
+# --- API FOR VERIFYING RECIPIENT ACCOUNT ---
+@app.route('/api/verify_account/<cust_id>')
+def verify_account(cust_id):
+    if 'role' not in session:
+        return jsonify({'success': False, 'message': 'Unauthorized'}), 401
+    
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT full_name, status, freeze_status FROM customers WHERE customer_id = ?", (acc_id,))
+    cursor.execute("SELECT full_name, freeze_status, status FROM customers WHERE customer_id = ?", (cust_id.strip(),))
     row = cursor.fetchone()
     conn.close()
+    
     if row:
-        return jsonify({
-            'success': True,
-            'name': row['full_name'],
-            'status': row['status'],
-            'freeze_status': row['freeze_status']
-        })
-    return jsonify({'success': False, 'message': 'Account Hin Argamne!'})
+        if row['status'] != 'ACTIVE':
+            return jsonify({'success': False, 'message': '⚠️ Akkaawuntiin kun Active miti!'})
+        if row['freeze_status'] == 'FROZEN':
+            return jsonify({'success': False, 'message': '🔒 Akkaawuntiin kun UGGURAMEERA!'})
+        return jsonify({'success': True, 'full_name': row['full_name']})
+    else:
+        return jsonify({'success': False, 'message': '❌ Akkaawuntiin hin argamne!'})
 
 # --- UI TEMPLATE ---
 HTML_LAYOUT = """
@@ -390,12 +397,10 @@ HTML_LAYOUT = """
 </html>
 """
 
-# --- STATIC FILE SERVING WITH COMPRESSION RETRIEVAL ---
 @app.route('/uploads/<filename>')
 def uploaded_file(filename):
     return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
 
-# --- ROUTES & VIEWS ---
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     error = None
@@ -530,7 +535,7 @@ def dashboard():
     """
     return render_template_string(HTML_LAYOUT.replace("{% block content %}{% endblock %}", content), notifications=NOTIFICATIONS)
 
-# --- MAKER TRANSACTION ROUTE (UPDATED WITH DOUBLE ENTRY & ACCOUNT VERIFY) ---
+# --- MAKER TRANSACTION ROUTE (WITH DOUBLE AMOUNT CONFIRMATION & RECIPIENT VERIFICATION) ---
 @app.route('/transaction', methods=['GET', 'POST'])
 def transaction():
     if 'role' not in session or session['role'] != 'MAKER':
@@ -548,22 +553,15 @@ def transaction():
         txn_type = request.form.get('txn_type')
         cust_id = request.form.get('customer_id')
         target_acc = request.form.get('target_account', '').strip()
-        amount_str = request.form.get('amount', '0.0')
-        amount_confirm_str = request.form.get('amount_confirm', '0.0')
+        amount = float(request.form.get('amount', 0.0))
+        confirm_amount = float(request.form.get('confirm_amount', 0.0))
         bank_name = request.form.get('bank_name', 'Imana Microfinance Core')
-
-        try:
-            amount = float(amount_str)
-            amount_confirm = float(amount_confirm_str)
-        except ValueError:
-            amount = 0.0
-            amount_confirm = -1.0
 
         cursor.execute("SELECT full_name, balance, freeze_status FROM customers WHERE customer_id = ?", (cust_id,))
         cust = cursor.fetchone()
 
-        if amount != amount_confirm:
-            msg = "❌ Dogoggora! Hamma maallaqaa bakka lamatti galchitan wal hin simu. Irra deebi'aatii mirkaneessaa!"
+        if amount != confirm_amount:
+            msg = "❌ Lakkoofsi maallaqaa bakka lamatti galchitan wal-hin simne! Dogoggora malee irra deebi'a galchaa."
             msg_type = "red"
         elif not cust:
             msg = "❌ Maammilli hin argamne!"
@@ -621,23 +619,28 @@ def transaction():
                     {cust_options}
                 </select>
             </div>
+            
+            <!-- RECIPIENT VERIFICATION UI -->
             <div class="form-group" id="target_acc_group" style="display:none; background:#f0fdf4; padding:10px; border-radius:8px; border:1px solid #bbf7d0;">
-                <label>Account ID Nama Fudhatuu (Target Account ID)</label>
-                <div style="display:flex; gap:8px;">
-                    <input type="text" name="target_account" id="target_account" placeholder="Fkn: 100099008801" class="input-field">
-                    <button type="button" class="btn-action btn-blue" onclick="verifyAccount()">Verify 🔍</button>
+                <label style="color:#166534;">Target Account ID (Nama Ergamuuf)</label>
+                <div style="display:flex; gap:6px;">
+                    <input type="text" id="target_account_input" name="target_account" placeholder="Fkn: 100099008801" class="input-field">
+                    <button type="button" onclick="verifyRecipient()" class="btn-action btn-blue" style="white-space:nowrap;">🔍 Verify</button>
                 </div>
-                <div id="verify_result" style="font-size:12px; font-weight:bold; margin-top:6px;"></div>
+                <p id="verify_result" style="font-size:11px; font-weight:bold; margin-top:4px; color:#047857;"></p>
+            </div>
+
+            <!-- DOUBLE ENTRY AMOUNT TO PREVENT ERRORS -->
+            <div class="form-group">
+                <label>Hamma Maallaqaa (Amount in Birr)</label>
+                <input type="number" step="0.01" id="amount" name="amount" placeholder="0.00" required class="input-field">
             </div>
             <div class="form-group">
-                <label>1. Hamma Maallaqaa (Amount in Birr)</label>
-                <input type="number" step="0.01" name="amount" id="amount" placeholder="0.00" required class="input-field">
+                <label>Irra Deebi'i Galchi (Confirm Amount)</label>
+                <input type="number" step="0.01" id="confirm_amount" name="confirm_amount" placeholder="0.00" required class="input-field" oninput="checkMatch()">
+                <p id="amount_err" style="font-size:10px; color:red; display:none; margin-top:2px;">⚠️ Lakkoofsi galchitan wal-hin simne!</p>
             </div>
-            <div class="form-group">
-                <label>2. Irra Deebi'ii Hamma Maallaqaa Galchi (Confirm Amount)</label>
-                <input type="number" step="0.01" name="amount_confirm" id="amount_confirm" placeholder="0.00" required class="input-field">
-                <span id="amount_match_msg" style="font-size:11px; font-weight:bold;"></span>
-            </div>
+
             <div class="form-group">
                 <label>Moggaasa Baankii / Note</label>
                 <input type="text" name="bank_name" value="Imana Microfinance Core" class="input-field">
@@ -657,34 +660,50 @@ def transaction():
         }}
     }}
 
-    function verifyAccount() {{
-        var acc = document.getElementById('target_account').value.trim();
+    function verifyRecipient() {{
+        var targetId = document.getElementById('target_account_input').value;
         var resDiv = document.getElementById('verify_result');
-        if (!acc) {{
-            resDiv.innerHTML = "<span style='color:red;'>⚠️ Lakk. Akkawuntii galchaa!</span>";
+        if (!targetId) {{
+            resDiv.style.color = "red";
+            resDiv.innerText = "⚠️ Lakkoofsa Akkaawuntii Galchaa!";
             return;
         }}
-        resDiv.innerHTML = "<span style='color:blue;'>Searching...</span>";
-        fetch('/verify_account/' + acc)
-            .then(res => res.json())
-            .then(data => {{
-                if (data.success) {{
-                    var st = data.freeze_status === 'FROZEN' ? " 🔒 (FROZEN)" : " ✅ (Active)";
-                    resDiv.innerHTML = "<span style='color:green;'>👤 Nama Ergamuuf: " + data.name + st + "</span>";
-                }} else {{
-                    resDiv.innerHTML = "<span style='color:red;'>❌ " + data.message + "</span>";
-                }}
-            }})
-            .catch(err => {{
-                resDiv.innerHTML = "<span style='color:red;'>Dogoggora networkii!</span>";
-            }});
+        resDiv.style.color = "#0284c7";
+        resDiv.innerText = "Barbaadaa jira...";
+        
+        fetch('/api/verify_account/' + targetId)
+        .then(response => response.json())
+        .then(data => {{
+            if (data.success) {{
+                resDiv.style.color = "#16a34a";
+                resDiv.innerText = "✅ Recipient Verified: " + data.full_name;
+            }} else {{
+                resDiv.style.color = "#dc2626";
+                resDiv.innerText = data.message;
+            }}
+        }})
+        .catch(err => {{
+            resDiv.style.color = "red";
+            resDiv.innerText = "❌ Dogoggorri uumameera.";
+        }});
+    }}
+
+    function checkMatch() {{
+        var a1 = document.getElementById('amount').value;
+        var a2 = document.getElementById('confirm_amount').value;
+        var err = document.getElementById('amount_err');
+        if(a1 && a2 && a1 !== a2) {{
+            err.style.display = 'block';
+        }} else {{
+            err.style.display = 'none';
+        }}
     }}
 
     function validateAmounts() {{
-        var a1 = parseFloat(document.getElementById('amount').value);
-        var a2 = parseFloat(document.getElementById('amount_confirm').value);
-        if (a1 !== a2) {{
-            alert("❌ Hamma maallaqaa bakka lamatti galchitan wal hin simu! Irra deebi'aatii mirkaneessaa.");
+        var a1 = document.getElementById('amount').value;
+        var a2 = document.getElementById('confirm_amount').value;
+        if(a1 !== a2) {{
+            alert("❌ Hamma maallaqaa bakka lamatti galchitan wal-simsiisaa!");
             return false;
         }}
         return true;
@@ -693,7 +712,6 @@ def transaction():
     """
     return render_template_string(HTML_LAYOUT.replace("{% block content %}{% endblock %}", content), notifications=NOTIFICATIONS)
 
-# --- MAKER RECEIPTS ROUTE ---
 @app.route('/maker_receipts')
 def maker_receipts():
     if 'role' not in session or session['role'] != 'MAKER':
@@ -733,7 +751,6 @@ def maker_receipts():
     """
     return render_template_string(HTML_LAYOUT.replace("{% block content %}{% endblock %}", content), notifications=NOTIFICATIONS)
 
-# --- CEO PRIVATE VIEW: MUDARABA LIST & PROFIT SPLIT ---
 @app.route('/ceo_mudaraba_list')
 def ceo_mudaraba_list():
     if 'role' not in session or session['role'] != 'CEO':
@@ -793,7 +810,6 @@ def ceo_mudaraba_list():
     """
     return render_template_string(HTML_LAYOUT.replace("{% block content %}{% endblock %}", content), notifications=NOTIFICATIONS)
 
-# --- REGISTER CUSTOMER ROUTE (FAST MAKER OPTIMIZATION) ---
 @app.route('/register', methods=['GET', 'POST'])
 def register():
     if 'role' not in session or session['role'] != 'MAKER':
@@ -896,7 +912,6 @@ def register():
     """
     return render_template_string(HTML_LAYOUT.replace("{% block content %}{% endblock %}", content), notifications=NOTIFICATIONS)
 
-# --- STATEMENT PRINTING ROUTE FOR ALL EMPLOYEES ---
 @app.route('/statement/<cust_id>')
 def statement(cust_id):
     if 'role' not in session:
@@ -967,7 +982,6 @@ def statement(cust_id):
     """
     return render_template_string(HTML_LAYOUT.replace("{% block content %}{% endblock %}", content), notifications=NOTIFICATIONS)
 
-# --- EDIT CUSTOMER INFORMATION ROUTE (MANAGER ONLY) ---
 @app.route('/edit_customer/<cust_id>', methods=['GET', 'POST'])
 def edit_customer(cust_id):
     if 'role' not in session or session['role'] != 'MANAGER':
@@ -1076,7 +1090,6 @@ def edit_customer(cust_id):
     """
     return render_template_string(HTML_LAYOUT.replace("{% block content %}{% endblock %}", content), notifications=NOTIFICATIONS)
 
-# --- ISLAMIC FINANCING (MUDARABA & MURABAHA) ---
 @app.route('/islamic_loan', methods=['GET', 'POST'])
 def islamic_loan():
     if 'role' not in session or session['role'] not in ['LOAN_OFFICER', 'CEO', 'MANAGER']:
@@ -1670,7 +1683,7 @@ def ceo_backup():
         if action == 'restore':
             file = request.files.get('backup_file')
             if file and file.filename.endswith('.db'):
-                temp_path = os.path.join(BASE_DIR, "temp_restore.db")
+                temp_path = os.path.join(app.config['BACKUP_FOLDER'], "temp_restore.db")
                 file.save(temp_path)
                 try:
                     test_conn = sqlite3.connect(temp_path)
@@ -1726,7 +1739,7 @@ def download_db():
 
     now_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     backup_filename = f"imana_microfinance_backup_{now_str}.db"
-    backup_file_path = os.path.join(BASE_DIR, backup_filename)
+    backup_file_path = os.path.join(app.config['BACKUP_FOLDER'], backup_filename)
     
     try:
         with get_db_connection() as src_conn:
@@ -1929,36 +1942,38 @@ def print_receipt(txn_id):
             body {{ font-family: sans-serif; padding: 20px; max-width: 400px; margin: 0 auto; border: 1px solid #ccc; border-radius: 8px; }}
             .header {{ text-align: center; border-bottom: 2px dashed #000; padding-bottom: 10px; margin-bottom: 15px; }}
             .row {{ display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 13px; }}
-            .footer {{ text-align: center; border-top: 2px dashed #000; padding-top: 10px; margin-top: 15px; font-size: 11px; }}
-            .btn-print {{ background: #065f46; color: white; border: none; padding: 10px; width: 100%; font-size: 14px; font-weight: bold; cursor: pointer; border-radius: 6px; margin-top: 15px; }}
+            .footer {{ text-align: center; border-top: 2px dashed #000; padding-top: 10px; margin-top: 15px; font-size: 11px; color: #666; }}
+            .btn-print {{ background: #065f46; color: white; border: none; padding: 10px; width: 100%; font-weight: bold; cursor: pointer; border-radius: 6px; margin-top: 15px; }}
             @media print {{ .btn-print {{ display: none; }} body {{ border: none; }} }}
         </style>
     </head>
     <body>
         <div class="header">
             <h2 style="color:#065f46; margin:0;">IMANA MICROFINANCE</h2>
-            <p style="font-size:11px;">Nagahee Transaction / Receipt</p>
+            <p style="font-size:12px; margin-top:2px;">Nagahee Kaffaltii (Transaction Receipt)</p>
         </div>
-        <div class="row"><span>FT Reference:</span><b>{t['ft_reference']}</b></div>
-        <div class="row"><span>Guyyaa:</span><b>{t['timestamp']}</b></div>
-        <div class="row"><span>Gosa Transaction:</span><b>{t['txn_type']}</b></div>
-        <div class="row"><span>Maammila:</span><b>{t['customer_name']}</b></div>
-        <div class="row"><span>Account ID:</span><b>{t['customer_id']}</b></div>
-        {transfer_details}
-        <div class="row" style="font-size:15px; border-top:1px solid #eee; pt:6px;"><span>Hamma Maallaqaa:</span><b style="color:#065f46;">{t['amount']:,.2f} Birr</b></div>
-        <div class="row"><span>Status:</span><b>{t['status']}</b></div>
-        <div class="row"><span>Maker (Hojjataa):</span><b>{t['created_by']}</b></div>
         
+        <div class="row"><span>FT Reference:</span><b>{t['ft_reference']}</b></div>
+        <div class="row"><span>Guyyaa:</span><span>{t['timestamp']}</span></div>
+        <div class="row"><span>Gosa Kaffaltii:</span><b>{t['txn_type']}</b></div>
+        {transfer_details}
+        {f'<div class="row"><span>Maammila:</span><b>{t["customer_name"]} ({t["customer_id"]})</b></div>' if t['txn_type'] != 'T24_TRANSFER' else ''}
+        <div class="row" style="font-size:15px; margin-top:10px; border-top:1px solid #eee; padding-top:8px;">
+            <span>Hamma (Amount):</span><b style="color:#065f46;">{t['amount']:,.2f} Birr</b>
+        </div>
+        <div class="row"><span>Status:</span><b>{t['status']}</b></div>
+        <div class="row"><span>Maker:</span><span>{t['created_by']}</span></div>
+
         <div class="footer">
-            <p>Galatoomaa! / Thank you!</p>
-            <p>Imana Free Interest Microfinance Service</p>
+            <p>Galatoomaa! Microfinance Islaamaa Dhala Irraa Bilisaa.</p>
         </div>
 
-        <button onclick="window.print()" class="btn-print">🖨️ Print Nagahee</button>
+        <button onclick="window.print()" class="btn-print">🖨️ Maxxansi (Print Receipt)</button>
     </body>
     </html>
     """
     return receipt_html
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port, debug=True)
