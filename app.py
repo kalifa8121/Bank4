@@ -31,8 +31,10 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 NOTIFICATIONS = []
 
 # --- NEON.TECH / POSTGRESQL DATABASE CONNECTION ---
-# Render/Neon automatically sets DATABASE_URL environment variable
-DATABASE_URL = os.environ.get('DATABASE_URL', 'postgresql://neondb_owner:npg_12345@ep-cool-sample-a5xyz.us-east-2.aws.neon.tech/neondb?sslmode=require')
+#hubachiisa: Paaswordii keessan isa sirrii Neon.tech dashboard irraa fuutanii 'PAASWORDII_SIRRII_KANAAN_BAKKA_BUUSAA' irratti bakka buutsaa.
+# Render irratti Environment Variable (DATABASE_URL) kan saagtaniif otumaan offumaan fuudha.
+DEFAULT_DB_URL = 'postgresql://neondb_owner:PAASWORDII_SIRRII_KANAAN_BAKKA_BUUSAA@ep-cool-sample-a5xyz.us-east-2.aws.neon.tech/neondb?sslmode=require'
+DATABASE_URL = os.environ.get('DATABASE_URL', DEFAULT_DB_URL)
 
 def get_db_connection(max_retries=5, delay=0.5):
     """Establishes connection to Neon.tech PostgreSQL database with retry logic"""
@@ -1859,7 +1861,8 @@ def print_receipt(txn_id):
     if t and t['target_account']:
         cursor.execute("SELECT full_name FROM customers WHERE customer_id = %s;", (t['target_account'],))
         t_row = cursor.fetchone()
-        target_name = t_row['full_name'] if t_row else "N/A"
+        if t_row:
+            target_name = t_row['full_name']
 
     cursor.close()
     conn.close()
@@ -1867,48 +1870,46 @@ def print_receipt(txn_id):
     if not t:
         return "Transaction Hin Argamne", 404
 
-    transfer_details = ""
-    if t['txn_type'] == 'T24_TRANSFER':
-        transfer_details = f"""
-        <div class="row"><span>Nama Erge (Sender):</span><b>{t['customer_name']} (Acc: {t['customer_id']})</b></div>
-        <div class="row"><span>Nama Fudhate (Receiver):</span><b>{target_name} (Acc: {t['target_account']})</b></div>
-        """
-
-    receipt_html = f"""
+    return f"""
     <!DOCTYPE html>
     <html>
     <head>
         <title>Nagahee Kaffaltii - {t['ft_reference']}</title>
         <style>
-            body {{ font-family: sans-serif; padding: 20px; max-width: 400px; margin: 0 auto; border: 1px solid #ccc; border-radius: 8px; }}
-            .header {{ text-align: center; border-bottom: 2px dashed #000; padding-bottom: 10px; margin-bottom: 15px; }}
-            .row {{ display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 13px; }}
-            .btn-print {{ background: #065f46; color: white; border: none; padding: 10px; width: 100%; font-weight: bold; cursor: pointer; border-radius: 6px; margin-top: 15px; }}
+            body {{ font-family: sans-serif; padding: 20px; max-width: 400px; margin: 0 auto; border: 1px dashed #000; font-size: 12px; }}
+            .center {{ text-align: center; }}
+            .line {{ border-bottom: 1px dashed #000; margin: 10px 0; }}
+            .flex {{ display: flex; justify-content: space-between; margin-bottom: 4px; }}
+            .btn-print {{ background: #065f46; color: white; border: none; padding: 10px; width: 100%; font-weight: bold; cursor: pointer; border-radius: 4px; margin-top: 15px; }}
             @media print {{ .btn-print {{ display: none; }} body {{ border: none; }} }}
         </style>
     </head>
     <body>
-        <div class="header">
-            <h2 style="color:#065f46; margin:0;">IMANA MICROFINANCE</h2>
-            <p style="font-size:11px;">Nagahee Kaffaltii (Official Receipt)</p>
+        <div class="center">
+            <h2 style="margin:0; color:#065f46;">IMANA MICROFINANCE</h2>
+            <p style="margin:2px 0;">Free Interest Microfinance</p>
+            <p style="margin:2px 0; font-weight:bold;">NAGAHEE KAFFALTII (RECEIPT)</p>
         </div>
-        <div class="row"><span>FT Reference:</span><b>{t['ft_reference']}</b></div>
-        <div class="row"><span>Guyyaa:</span><b>{t['timestamp']}</b></div>
-        <div class="row"><span>Gosa Transaction:</span><b>{t['txn_type']}</b></div>
-        <div class="row"><span>Maammila:</span><b>{t['customer_name']}</b></div>
-        {transfer_details}
-        <div class="row" style="font-size:16px; font-weight:bold; border-top:1px solid #ccc; padding-top:8px;">
-            <span>Hamma (Amount):</span><span style="color:#065f46;">{float(t['amount']):,.2f} Birr</span>
+        <div class="line"></div>
+        <div class="flex"><span>Ref No (FT):</span> <b>{t['ft_reference']}</b></div>
+        <div class="flex"><span>Guyyaa:</span> <span>{t['timestamp']}</span></div>
+        <div class="flex"><span>Gosa Kaffaltii:</span> <b>{t['txn_type']}</b></div>
+        <div class="flex"><span>Maammila:</span> <span>{t['customer_name']}</span></div>
+        <div class="flex"><span>Account ID:</span> <span>{t['customer_id']}</span></div>
+        {f'<div class="flex"><span>Target Acc:</span> <span>{t["target_account"]} ({target_name})</span></div>' if t['target_account'] else ''}
+        <div class="line"></div>
+        <div class="flex" style="font-size:14px;"><span>Hamma (Amount):</span> <b>{float(t['amount']):,.2f} Birr</b></div>
+        <div class="flex"><span>Status:</span> <b>{t['status']}</b></div>
+        <div class="flex"><span>Maker (Hojjataa):</span> <span>{t['created_by']}</span></div>
+        <div class="line"></div>
+        <div class="center" style="font-size:10px; color:#555;">
+            Galatoomaa! / Thank you for banking with us.
         </div>
-        <div class="row"><span>Status:</span><b>{t['status']}</b></div>
-        <div class="row"><span>Maker:</span><b>{t['created_by']}</b></div>
-        
-        <button onclick="window.print()" class="btn-print">🖨️ Nagahee Maxxansi</button>
+        <button onclick="window.print()" class="btn-print">🖨️ Maxxansi (Print Receipt)</button>
     </body>
     </html>
     """
-    return receipt_html
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    app.run(host='0.0.0.0', port=port, debug=True)
