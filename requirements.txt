@@ -1,4 +1,2 @@
 Flask
-psycopg2-binary
 gunicorn
-pillow
