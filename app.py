@@ -30,7 +30,7 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 NOTIFICATIONS = []
 
-# --- POSTGRESQL DATABASE CONNECTION ---
+# --- POSTGRESQL DATABASE CONNECTION (NEON DB COMPATIBLE) ---
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
 def get_db_connection(max_retries=5, delay=1):
@@ -38,9 +38,17 @@ def get_db_connection(max_retries=5, delay=1):
     if not DATABASE_URL:
         raise ValueError("DATABASE_URL environment variable is not set!")
     
+    # Neon.tech connections require sslmode=require
+    db_url = DATABASE_URL
+    if "sslmode=" not in db_url:
+        if "?" in db_url:
+            db_url += "&sslmode=require"
+        else:
+            db_url += "?sslmode=require"
+
     for attempt in range(max_retries):
         try:
-            conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+            conn = psycopg2.connect(db_url, cursor_factory=RealDictCursor)
             return conn
         except Exception as e:
             if attempt < max_retries - 1:
@@ -95,101 +103,104 @@ def add_notification(message):
 
 # --- DATABASE SETUP & AUTO MIGRATION (POSTGRESQL) ---
 def init_db():
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            username VARCHAR(100) PRIMARY KEY,
-            password VARCHAR(255) NOT NULL,
-            role VARCHAR(50) NOT NULL,
-            status VARCHAR(50) DEFAULT 'ACTIVE'
-        );
-    """)
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                username VARCHAR(100) PRIMARY KEY,
+                password VARCHAR(255) NOT NULL,
+                role VARCHAR(50) NOT NULL,
+                status VARCHAR(50) DEFAULT 'ACTIVE'
+            );
+        """)
 
-    cursor.execute("SELECT COUNT(*) FROM users;")
-    if cursor.fetchone()['count'] == 0:
-        default_users = [
-            ('ceo', 'ceo999', 'CEO', 'ACTIVE'),
-            ('manager1', 'manager123', 'MANAGER', 'ACTIVE'),
-            ('maker1', 'maker123', 'MAKER', 'ACTIVE'),
-            ('auditor1', 'auditor123', 'AUDITOR', 'ACTIVE'),
-            ('officer1', 'officer123', 'LOAN_OFFICER', 'ACTIVE')
-        ]
-        cursor.executemany("INSERT INTO users VALUES (%s, %s, %s, %s);", default_users)
+        cursor.execute("SELECT COUNT(*) FROM users;")
+        if cursor.fetchone()['count'] == 0:
+            default_users = [
+                ('ceo', 'ceo999', 'CEO', 'ACTIVE'),
+                ('manager1', 'manager123', 'MANAGER', 'ACTIVE'),
+                ('maker1', 'maker123', 'MAKER', 'ACTIVE'),
+                ('auditor1', 'auditor123', 'AUDITOR', 'ACTIVE'),
+                ('officer1', 'officer123', 'LOAN_OFFICER', 'ACTIVE')
+            ]
+            cursor.executemany("INSERT INTO users VALUES (%s, %s, %s, %s);", default_users)
 
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS customers (
-            customer_id VARCHAR(100) PRIMARY KEY,
-            full_name VARCHAR(255),
-            phone VARCHAR(50),
-            gender VARCHAR(20) DEFAULT 'Dhiira',
-            account_type VARCHAR(50) DEFAULT 'WADIA',
-            photo_path TEXT,
-            signature_path TEXT,
-            national_id_path TEXT DEFAULT '',
-            balance DOUBLE PRECISION DEFAULT 0.0,
-            status VARCHAR(50) DEFAULT 'PENDING_APPROVAL',
-            freeze_status VARCHAR(50) DEFAULT 'UNFROZEN',
-            freeze_reason TEXT DEFAULT '',
-            created_at VARCHAR(100)
-        );
-    """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS customers (
+                customer_id VARCHAR(100) PRIMARY KEY,
+                full_name VARCHAR(255),
+                phone VARCHAR(50),
+                gender VARCHAR(20) DEFAULT 'Dhiira',
+                account_type VARCHAR(50) DEFAULT 'WADIA',
+                photo_path TEXT,
+                signature_path TEXT,
+                national_id_path TEXT DEFAULT '',
+                balance DOUBLE PRECISION DEFAULT 0.0,
+                status VARCHAR(50) DEFAULT 'PENDING_APPROVAL',
+                freeze_status VARCHAR(50) DEFAULT 'UNFROZEN',
+                freeze_reason TEXT DEFAULT '',
+                created_at VARCHAR(100)
+            );
+        """)
 
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS transactions (
-            txn_id VARCHAR(100) PRIMARY KEY,
-            txn_type VARCHAR(50),
-            customer_id VARCHAR(100),
-            customer_name VARCHAR(255),
-            target_account VARCHAR(100),
-            amount DOUBLE PRECISION,
-            commission DOUBLE PRECISION DEFAULT 0.0,
-            bank_name VARCHAR(255),
-            ft_reference VARCHAR(100),
-            status VARCHAR(50) DEFAULT 'PENDING_MANAGER',
-            created_by VARCHAR(100),
-            timestamp VARCHAR(100),
-            audited_status VARCHAR(50) DEFAULT 'OPEN'
-        );
-    """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS transactions (
+                txn_id VARCHAR(100) PRIMARY KEY,
+                txn_type VARCHAR(50),
+                customer_id VARCHAR(100),
+                customer_name VARCHAR(255),
+                target_account VARCHAR(100),
+                amount DOUBLE PRECISION,
+                commission DOUBLE PRECISION DEFAULT 0.0,
+                bank_name VARCHAR(255),
+                ft_reference VARCHAR(100),
+                status VARCHAR(50) DEFAULT 'PENDING_MANAGER',
+                created_by VARCHAR(100),
+                timestamp VARCHAR(100),
+                audited_status VARCHAR(50) DEFAULT 'OPEN'
+            );
+        """)
 
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS reversals (
-            reversal_id VARCHAR(100) PRIMARY KEY,
-            txn_id VARCHAR(100) NOT NULL,
-            reason TEXT NOT NULL,
-            requested_by VARCHAR(100) NOT NULL,
-            manager_approved INTEGER DEFAULT 0,
-            ceo_approved INTEGER DEFAULT 0,
-            status VARCHAR(50) DEFAULT 'PENDING_APPROVAL',
-            timestamp VARCHAR(100)
-        );
-    """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS reversals (
+                reversal_id VARCHAR(100) PRIMARY KEY,
+                txn_id VARCHAR(100) NOT NULL,
+                reason TEXT NOT NULL,
+                requested_by VARCHAR(100) NOT NULL,
+                manager_approved INTEGER DEFAULT 0,
+                ceo_approved INTEGER DEFAULT 0,
+                status VARCHAR(50) DEFAULT 'PENDING_APPROVAL',
+                timestamp VARCHAR(100)
+            );
+        """)
 
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS islamic_financing (
-            loan_id VARCHAR(100) PRIMARY KEY,
-            customer_id VARCHAR(100) NOT NULL,
-            customer_name VARCHAR(255),
-            financing_type VARCHAR(50) NOT NULL,
-            principal_amount DOUBLE PRECISION NOT NULL,
-            profit_margin DOUBLE PRECISION DEFAULT 0.0,
-            total_repayment DOUBLE PRECISION NOT NULL,
-            tenure_months INTEGER,
-            monthly_installment DOUBLE PRECISION,
-            status VARCHAR(50) DEFAULT 'PENDING_MANAGER',
-            manager_approved INTEGER DEFAULT 0,
-            ceo_approved INTEGER DEFAULT 0,
-            agent_notes TEXT,
-            created_by VARCHAR(100),
-            timestamp VARCHAR(100)
-        );
-    """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS islamic_financing (
+                loan_id VARCHAR(100) PRIMARY KEY,
+                customer_id VARCHAR(100) NOT NULL,
+                customer_name VARCHAR(255),
+                financing_type VARCHAR(50) NOT NULL,
+                principal_amount DOUBLE PRECISION NOT NULL,
+                profit_margin DOUBLE PRECISION DEFAULT 0.0,
+                total_repayment DOUBLE PRECISION NOT NULL,
+                tenure_months INTEGER,
+                monthly_installment DOUBLE PRECISION,
+                status VARCHAR(50) DEFAULT 'PENDING_MANAGER',
+                manager_approved INTEGER DEFAULT 0,
+                ceo_approved INTEGER DEFAULT 0,
+                agent_notes TEXT,
+                created_by VARCHAR(100),
+                timestamp VARCHAR(100)
+            );
+        """)
 
-    conn.commit()
-    cursor.close()
-    conn.close()
+        conn.commit()
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        print(f"Database init error: {e}")
 
 if DATABASE_URL:
     init_db()
@@ -256,7 +267,7 @@ HTML_LAYOUT = """
         .btn-card-ceo { background: #faf5ff; border-color: #e9d5ff; color: #581c87; }
         .btn-card-auditor { background: #fff7ed; border-color: #ffedd5; color: #c2410c; }
         .btn-card-loan { background: #f0fdf4; border-color: #bbf7d0; color: #15803d; }
-        .bottom-nav { position: fixed; bottom: 0; left: 0; right: 0; background: white; border-top: 1px solid #e2e8f0; display: flex; justify-content: space-around; padding: 10px 0; z-index: 50; }
+        .bottom-nav { position: fixed; bottom: 0; left: 0; right: 0; background: white; border-top: 1px solid #e2e8f0; display: flex; justify-around: font-size: 11px; flex: 1; font-weight: 500; }
         .bottom-nav a { text-align: center; color: #64748b; text-decoration: none; font-size: 11px; flex: 1; font-weight: 500; }
         .bottom-nav a span.icon { display: block; font-size: 18px; margin-bottom: 2px; }
         .box { background: white; padding: 20px; border-radius: 12px; border: 1px solid #e2e8f0; box-shadow: 0 1px 3px rgba(0,0,0,0.05); margin-bottom: 16px; }
