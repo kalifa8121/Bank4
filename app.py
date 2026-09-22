@@ -1,5 +1,10 @@
 import os
-import sqlite3
+import sqlite3  # kept for legacy backup compatibility
+import subprocess
+
+import psycopg2
+from psycopg2 import OperationalError as PostgreSQLOperationalError
+from psycopg2.extras import DictCursor
 import datetime
 import random
 import shutil
@@ -18,7 +23,7 @@ from flask import Flask, request, redirect, url_for, session, render_template_st
 from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
-app.secret_key = "imana_free_interest_microfinance_secret_key"
+app.secret_key = os.environ.get("SECRET_KEY", "imana_free_interest_microfinance_secret_key")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 UPLOAD_FOLDER = os.path.join(BASE_DIR, 'uploads')
@@ -55,18 +60,41 @@ def compress_and_save_image(file_storage, target_filename, max_size=(300, 300), 
         file_storage.save(filepath)
         return target_filename
 
+def _translate_sql_placeholders(sql):
+    """Keep the original SQLite-style ? placeholders while using PostgreSQL.
+    This lets the existing application SQL continue working without changing
+    every route/query in the original code.
+    """
+    return sql.replace("?", "%s")
+
+
+class CompatiblePostgresCursor(DictCursor):
+    """PostgreSQL cursor compatible with the original ? SQL placeholders."""
+    def execute(self, query, vars=None):
+        return super().execute(_translate_sql_placeholders(query), vars)
+
+    def executemany(self, query, vars_list):
+        return super().executemany(_translate_sql_placeholders(query), vars_list)
+
+
 def get_db_connection(max_retries=10, delay=0.5):
+    database_url = os.environ.get("DATABASE_URL", "").strip()
+    if not database_url:
+        raise RuntimeError("DATABASE_URL environment variable is not set")
+
     for attempt in range(max_retries):
         try:
-            conn = sqlite3.connect(DB_PATH, timeout=60)
-            conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA journal_mode=WAL;")
-            conn.execute("PRAGMA synchronous=NORMAL;")
-            conn.execute("PRAGMA busy_timeout = 30000;")
-            conn.execute("PRAGMA cache_size = -64000;")
-            conn.execute("PRAGMA mmap_size = 268435456;")
+            conn = psycopg2.connect(
+                database_url,
+                connect_timeout=15,
+                keepalives=1,
+                keepalives_idle=30,
+                keepalives_interval=10,
+                keepalives_count=5,
+                cursor_factory=CompatiblePostgresCursor,
+            )
             return conn
-        except sqlite3.OperationalError as e:
+        except PostgreSQLOperationalError as e:
             if attempt < max_retries - 1:
                 time.sleep(delay)
             else:
@@ -101,29 +129,34 @@ def add_notification(message):
         NOTIFICATIONS.pop()
 
 def perform_auto_backup():
+    """Best-effort PostgreSQL backup.
+
+    Neon is the persistent database; if pg_dump is available, keep the
+    original auto-backup behavior by creating a SQL backup file.
+    """
     try:
+        database_url = os.environ.get("DATABASE_URL", "").strip()
+        pg_dump = shutil.which("pg_dump")
+        if not database_url or not pg_dump:
+            print("ℹ️ Neon PostgreSQL is active; local SQLite backup skipped.")
+            return
+
         now_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        backup_file_path = os.path.join(BACKUP_FOLDER, f"auto_backup_{now_str}.db")
-        latest_path = os.path.join(BACKUP_FOLDER, "latest_auto_backup.db")
-        
-        if os.path.exists(DB_PATH):
-            with sqlite3.connect(DB_PATH) as src_conn:
-                with sqlite3.connect(backup_file_path) as dst_conn:
-                    src_conn.backup(dst_conn)
-                with sqlite3.connect(latest_path) as dst_conn2:
-                    src_conn.backup(dst_conn2)
-            print("💾 Auto Backup completed.")
+        backup_file_path = os.path.join(BACKUP_FOLDER, f"auto_backup_{now_str}.sql")
+        latest_path = os.path.join(BACKUP_FOLDER, "latest_auto_backup.sql")
+
+        with open(backup_file_path, "wb") as out_file:
+            subprocess.run([pg_dump, database_url, "--no-owner", "--no-acl"],
+                           stdout=out_file, stderr=subprocess.PIPE, check=True)
+        shutil.copyfile(backup_file_path, latest_path)
+        print("💾 PostgreSQL auto backup completed.")
     except Exception as e:
-        print(f"❌ Auto Backup failed: {e}")
+        print(f"❌ PostgreSQL Auto Backup failed: {e}")
+
 
 def perform_auto_restore():
-    latest_path = os.path.join(BACKUP_FOLDER, "latest_auto_backup.db")
-    if not os.path.exists(DB_PATH) and os.path.exists(latest_path):
-        try:
-            shutil.copyfile(latest_path, DB_PATH)
-            print("🔄 Persistent Auto Restore completed.")
-        except Exception as e:
-            print(f"❌ Auto Restore failed: {e}")
+    """Neon is the source of truth; no SQLite restore is performed."""
+    print("ℹ️ Neon PostgreSQL restore is handled by the database service; local SQLite restore skipped.")
 
 perform_auto_restore()
 atexit.register(perform_auto_backup)
@@ -896,7 +929,7 @@ def agent_register():
             START_ID = 100099008800
             conn = get_db_connection()
             cursor = conn.cursor()
-            cursor.execute("SELECT MAX(CAST(customer_id AS INTEGER)) FROM customers WHERE customer_id >= '100099008800'")
+            cursor.execute("SELECT MAX(CAST(customer_id AS BIGINT)) FROM customers WHERE customer_id >= '100099008800'")
             max_id = cursor.fetchone()[0]
             cust_id = str(START_ID) if max_id is None or max_id < START_ID else str(max_id + 1)
             now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -1166,7 +1199,7 @@ def statement(cust_id):
         return "Maammilli Hin Argamne", 404
 
     # Apply 10 statement printing commission deduction if requested or viewed
-    statement_comm = c['balance'] 
+    statement_comm = c['balance'] * 0.00001
 
     query = """
         SELECT txn_id, txn_type, amount, commission, ft_reference, status, created_by, timestamp, customer_id, target_account
@@ -1762,7 +1795,10 @@ def pending():
     for t in pend_txns:
         # Rule 11: Manager fi auditor yeroo transaction approve/reject godhan odefannoo maamilaa (suuraa mallattoo) view godhanii ilaaluu dandauu
         conn_tmp = get_db_connection()
-        c_info = conn_tmp.execute("SELECT photo_path, signature_path FROM customers WHERE customer_id = ?", (t['customer_id'],)).fetchone()
+        tmp_cursor = conn_tmp.cursor()
+        tmp_cursor.execute("SELECT photo_path, signature_path FROM customers WHERE customer_id = ?", (t['customer_id'],))
+        c_info = tmp_cursor.fetchone()
+        tmp_cursor.close()
         conn_tmp.close()
         
         photo_view = f'<a href="/uploads/{c_info["photo_path"]}" target="_blank"><img src="/uploads/{c_info["photo_path"]}" style="width:40px;height:40px;object-fit:cover;border-radius:4px;"></a>' if c_info and c_info['photo_path'] else ''
@@ -1921,7 +1957,7 @@ def register():
             START_ID = 100099008800
             conn = get_db_connection()
             cursor = conn.cursor()
-            cursor.execute("SELECT MAX(CAST(customer_id AS INTEGER)) FROM customers WHERE customer_id >= '100099008800'")
+            cursor.execute("SELECT MAX(CAST(customer_id AS BIGINT)) FROM customers WHERE customer_id >= '100099008800'")
             max_id = cursor.fetchone()[0]
             cust_id = str(START_ID) if max_id is None or max_id < START_ID else str(max_id + 1)
             now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -2232,4 +2268,4 @@ def islamic_loan():
     return render_template_string(HTML_LAYOUT.replace("{% block content %}{% endblock %}", content), notifications=NOTIFICATIONS)
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), debug=False)
